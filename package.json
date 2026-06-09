@@ -1,0 +1,38 @@
+{
+  "name": "wallet-data-service",
+  "version": "1.0.0",
+  "description": "Production-grade wallet data service built on chain-indexer",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "migrate": "tsx scripts/migrate.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["web3", "wallet", "indexer", "ethereum", "erc20", "nft"],
+  "license": "ISC",
+  "packageManager": "pnpm@10.30.3",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "express": "^5.1.0",
+    "ioredis": "^5.6.1",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.21.0",
+    "pino": "^9.6.0",
+    "pino-http": "^10.4.0",
+    "uuid": "^11.1.0",
+    "viem": "^2.51.3",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/jsonwebtoken": "^9.0.9",
+    "@types/node": "^22.15.21",
+    "@types/pg": "^8.20.0",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.3",
+    "typescript": "^6.0.3"
+  }
+}
