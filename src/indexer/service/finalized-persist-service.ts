@@ -53,10 +53,17 @@ export class FinalizedPersistService<T extends { blockNumber: bigint }> {
     batchMaxBlock: bigint,
     options: PersistBatchOptions = {},
   ): Promise<number> {
-    const finalized = await getSafeBlockNumber(this.httpClient, this.env.CONFIRMATION_DEPTH);
-    const effectiveMax = batchMaxBlock > finalized ? finalized : batchMaxBlock;
+    // safeUpper：链上「可安全落库」的上界 = latest - CONFIRMATION_DEPTH。
+    // 注意这是确认深度上界，并非链上真正最终化（finalized）的块号。
+    // 超过此高度的块仍可能被 reorg，只用于实时展示，不写库。
+    const safeUpper = await getSafeBlockNumber(this.httpClient, this.env.CONFIRMATION_DEPTH);
+    // effectiveMax：本批次实际能推进到的最高块 = min(本批最高块, safeUpper)。
+    // 后续分区、checkpoint、anchor 上界都以此为准，不会超过确认深度。
+    const effectiveMax = batchMaxBlock > safeUpper ? safeUpper : batchMaxBlock;
 
-    const filtered = records.filter((r) => r.blockNumber <= finalized);
+    // 只保留已确认深度的记录；未确认的留在内存里等下一批。
+    const filtered = records.filter((r) => r.blockNumber <= safeUpper);
+    // currentCheckpoint：该合约在本 indexer 下已持久化的最高块（合约级游标）。
     const currentCheckpoint = await this.checkpointRepo.get(
       contract.chainId, contract.address, this.indexerType,
     );
@@ -67,13 +74,18 @@ export class FinalizedPersistService<T extends { blockNumber: bigint }> {
     try {
       await client.query('BEGIN');
 
+      // block anchor：链级游标，记录每个块号的 hash，用于 reorg 检测。
       if (options.forceAdvance) {
+        // backfill 场景：区间内可能没有 transfer，但仍需补写 anchor 并推进 checkpoint。
+        // anchorStart：从哪块开始补写 anchor（默认 = checkpoint+1，或调用方显式指定）。
         const anchorStart =
           options.anchorFromBlock ??
           (currentCheckpoint != null ? currentCheckpoint + 1n : effectiveMax);
+        // from：anchor 写入起点，不超过 effectiveMax。
         const from = anchorStart > effectiveMax ? effectiveMax : anchorStart;
         await this.writeAnchorsForRange(client, contract.chainId, from, effectiveMax);
       } else if (filtered.length > 0) {
+        // live 场景：只为本批实际出现的块写 anchor（有日志才有块）。
         const blocks = [...new Set(filtered.map((r) => r.blockNumber))].sort(
           (a, b) => (a < b ? -1 : a > b ? 1 : 0),
         );
@@ -86,6 +98,8 @@ export class FinalizedPersistService<T extends { blockNumber: bigint }> {
         ? await this.transferRepo.batchUpsert(client, filtered)
         : 0;
 
+      // 合约 checkpoint 是否从 currentCheckpoint 推进到 effectiveMax。
+      // live 模式要求逐块 +1；backfill 的 forceAdvance 可一次跳过空块区间。
       const shouldAdvance = this.shouldAdvanceCheckpoint(options, currentCheckpoint, effectiveMax);
       if (shouldAdvance) {
         const hash = await this.blockAnchorRepo.getHashAt(client, contract.chainId, effectiveMax);

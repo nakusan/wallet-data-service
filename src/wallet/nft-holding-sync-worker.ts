@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 import type Redis from 'ioredis';
-import { ZERO_ADDRESS } from '../config/constants.js';
+import { ZERO_ADDRESS, MATERIALIZATION_LOCK_CLASS } from '../config/constants.js';
 import { CacheKeys } from '../infrastructure/cache/redis-client.js';
 import { logger } from '../infrastructure/logger/logger.js';
 
@@ -53,37 +53,58 @@ export class NftHoldingSyncWorker {
   }
 
   private async sync(): Promise<void> {
-    const { rows: stateRows } = await this.pool.query(
-      `SELECT last_synced_block FROM balance_sync_state
-       WHERE chain_id=$1 AND sync_type='nft'`,
-      [this.chainId],
-    );
-    const lastSynced = BigInt(stateRows[0]?.last_synced_block ?? 0);
-
-    const { rows: chainRows } = await this.pool.query(
-      `SELECT last_finalized_block FROM indexer_chain_state WHERE chain_id=$1`,
-      [this.chainId],
-    );
-    const finalized = BigInt(chainRows[0]?.last_finalized_block ?? 0);
-    if (lastSynced >= finalized) return;
-
-    const fromBlock = lastSynced + 1n;
-    const toBlock = fromBlock + BATCH_BLOCKS - 1n <= finalized ? fromBlock + BATCH_BLOCKS - 1n : finalized;
-
-    const { rows } = await this.pool.query<NftTransferRow>(
-      `SELECT contract_address, token_id, token_standard,
-              from_address, to_address, amount, block_number
-       FROM nft_transfers
-       WHERE chain_id=$1 AND status='indexed'
-         AND block_number BETWEEN $2 AND $3
-       ORDER BY block_number, log_index, batch_index`,
-      [this.chainId, fromBlock.toString(), toBlock.toString()],
-    );
-
     const client = await this.pool.connect();
     const affectedAddrs = new Set<string>();
     try {
       await client.query('BEGIN');
+      // 与 ReorgService 回滚互斥
+      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [
+        MATERIALIZATION_LOCK_CLASS,
+        this.chainId,
+      ]);
+
+      const { rows: stateRows } = await client.query(
+        `SELECT last_synced_block FROM balance_sync_state
+         WHERE chain_id=$1 AND sync_type='nft' FOR UPDATE`,
+        [this.chainId],
+      );
+      const lastSynced = BigInt(stateRows[0]?.last_synced_block ?? 0);
+
+      // 上界 = LEAST(indexer 写入进度, 链上真正最终化块号)
+      const { rows: chainRows } = await client.query(
+        `SELECT LEAST(min_indexed_checkpoint, finalized_block) AS safe_upper
+         FROM indexer_chain_state WHERE chain_id=$1`,
+        [this.chainId],
+      );
+      const finalized = BigInt(chainRows[0]?.safe_upper ?? 0);
+      if (lastSynced >= finalized) {
+        await client.query('COMMIT');
+        return;
+      }
+
+      const fromBlock = lastSynced + 1n;
+      const toBlock = fromBlock + BATCH_BLOCKS - 1n <= finalized ? fromBlock + BATCH_BLOCKS - 1n : finalized;
+
+      const { rows } = await client.query<NftTransferRow>(
+        `SELECT contract_address, token_id, token_standard,
+                from_address, to_address, amount, block_number
+         FROM (
+           SELECT contract_address, token_id, token_standard, from_address,
+                  to_address, amount, block_number, log_index, batch_index
+           FROM nft_transfers
+           WHERE chain_id=$1 AND status='indexed'
+             AND block_number BETWEEN $2 AND $3
+           UNION ALL
+           SELECT contract_address, token_id, token_standard, from_address,
+                  to_address, amount, block_number, log_index, batch_index
+           FROM archive.nft_transfers
+           WHERE chain_id=$1 AND status='indexed'
+             AND block_number BETWEEN $2 AND $3
+         ) t
+         ORDER BY block_number, log_index, batch_index`,
+        [this.chainId, fromBlock.toString(), toBlock.toString()],
+      );
+
       for (const row of rows) {
         await this.applyTransfer(client, row, toBlock);
         affectedAddrs.add(row.from_address);

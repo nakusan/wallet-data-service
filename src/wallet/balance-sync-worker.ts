@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
 import type Redis from 'ioredis';
+import { MATERIALIZATION_LOCK_CLASS, ZERO_ADDRESS } from '../config/constants.js';
 import { CacheKeys } from '../infrastructure/cache/redis-client.js';
 import { logger } from '../infrastructure/logger/logger.js';
 
@@ -42,29 +43,38 @@ export class BalanceSyncWorker {
   }
 
   private async sync(): Promise<void> {
-    // 1. 读水位线
-    const { rows: stateRows } = await this.pool.query(
-      `SELECT last_synced_block FROM balance_sync_state
-       WHERE chain_id=$1 AND sync_type='erc20'`,
-      [this.chainId],
-    );
-    const lastSynced = BigInt(stateRows[0]?.last_synced_block ?? 0);
-
-    // 2. 上界 = 链级 finalized（不超前 indexer）
-    const { rows: chainRows } = await this.pool.query(
-      `SELECT last_finalized_block FROM indexer_chain_state WHERE chain_id=$1`,
-      [this.chainId],
-    );
-    const finalized = BigInt(chainRows[0]?.last_finalized_block ?? 0);
-    if (lastSynced >= finalized) return;
-
-    const fromBlock = lastSynced + 1n;
-    const toBlock = fromBlock + BATCH_BLOCKS - 1n <= finalized ? fromBlock + BATCH_BLOCKS - 1n : finalized;
-
-    // 3. 增量 delta 聚合 → upsert 余额（事务保证原子性）
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      // 与 ReorgService 回滚互斥：保证水位线读取与余额写入之间不被 reorg 穿插
+      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [
+        MATERIALIZATION_LOCK_CLASS,
+        this.chainId,
+      ]);
+
+      // 1. 锁定并读水位线（FOR UPDATE 防止与 reorg 回滚竞争）
+      const { rows: stateRows } = await client.query(
+        `SELECT last_synced_block FROM balance_sync_state
+         WHERE chain_id=$1 AND sync_type='erc20' FOR UPDATE`,
+        [this.chainId],
+      );
+      const lastSynced = BigInt(stateRows[0]?.last_synced_block ?? 0);
+
+      // 2. 上界 = LEAST(indexer 写入进度, 链上真正最终化块号)
+      //    既不超前 indexer，也绝不消费可能被 reorg 的块
+      const { rows: chainRows } = await client.query(
+        `SELECT LEAST(min_indexed_checkpoint, finalized_block) AS safe_upper
+         FROM indexer_chain_state WHERE chain_id=$1`,
+        [this.chainId],
+      );
+      const finalized = BigInt(chainRows[0]?.safe_upper ?? 0);
+      if (lastSynced >= finalized) {
+        await client.query('COMMIT');
+        return;
+      }
+
+      const fromBlock = lastSynced + 1n;
+      const toBlock = fromBlock + BATCH_BLOCKS - 1n <= finalized ? fromBlock + BATCH_BLOCKS - 1n : finalized;
 
       await client.query(
         `WITH delta AS (
@@ -72,28 +82,28 @@ export class BalanceSyncWorker {
                   SUM(amount_raw::NUMERIC) AS d
            FROM token_transfers
            WHERE chain_id=$1 AND status='indexed'
-             AND block_number BETWEEN $2 AND $3
+             AND block_number BETWEEN $2 AND $3 AND to_address<>$4
            GROUP BY chain_id, contract_address, to_address
            UNION ALL
            SELECT chain_id, contract_address, from_address AS holder,
                   -SUM(amount_raw::NUMERIC) AS d
            FROM token_transfers
            WHERE chain_id=$1 AND status='indexed'
-             AND block_number BETWEEN $2 AND $3
+             AND block_number BETWEEN $2 AND $3 AND from_address<>$4
            GROUP BY chain_id, contract_address, from_address
            UNION ALL
            SELECT chain_id, contract_address, to_address AS holder,
                   SUM(amount_raw::NUMERIC) AS d
            FROM archive.token_transfers
            WHERE chain_id=$1 AND status='indexed'
-             AND block_number BETWEEN $2 AND $3
+             AND block_number BETWEEN $2 AND $3 AND to_address<>$4
            GROUP BY chain_id, contract_address, to_address
            UNION ALL
            SELECT chain_id, contract_address, from_address AS holder,
                   -SUM(amount_raw::NUMERIC) AS d
            FROM archive.token_transfers
            WHERE chain_id=$1 AND status='indexed'
-             AND block_number BETWEEN $2 AND $3
+             AND block_number BETWEEN $2 AND $3 AND from_address<>$4
            GROUP BY chain_id, contract_address, from_address
          ),
          net AS (
@@ -106,20 +116,18 @@ export class BalanceSyncWorker {
             symbol, decimals, balance_raw, balance, last_transfer_block)
          SELECT n.chain_id, n.contract_address, n.holder,
                 mc.symbol, mc.decimals,
-                GREATEST(0, n.net_delta),
-                GREATEST(0, n.net_delta / POWER(10, mc.decimals)),
+                n.net_delta,
+                n.net_delta / POWER(10, mc.decimals),
                 $3
          FROM net n
          JOIN monitored_contracts mc
            ON mc.chain_id=n.chain_id AND mc.address=n.contract_address
          ON CONFLICT (chain_id, contract_address, holder_address) DO UPDATE
-           SET balance_raw = GREATEST(0,
-                 token_balances.balance_raw + EXCLUDED.balance_raw),
-               balance = GREATEST(0,
-                 token_balances.balance + EXCLUDED.balance),
+           SET balance_raw = token_balances.balance_raw + EXCLUDED.balance_raw,
+               balance = token_balances.balance + EXCLUDED.balance,
                last_transfer_block = EXCLUDED.last_transfer_block,
                updated_at = NOW()`,
-        [this.chainId, fromBlock.toString(), toBlock.toString()],
+        [this.chainId, fromBlock.toString(), toBlock.toString(), ZERO_ADDRESS],
       );
 
       await client.query(

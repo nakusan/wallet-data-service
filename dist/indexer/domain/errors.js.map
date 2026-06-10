@@ -1,0 +1,1 @@
+{"version":3,"file":"errors.js","sourceRoot":"","sources":["../../../src/indexer/domain/errors.ts"],"names":[],"mappings":"AAAA,MAAM,OAAO,kBAAmB,SAAQ,KAAK;IAIhC;IACA;IAJF,IAAI,GAAG,oBAAoB,CAAC;IAErC,YACW,SAAiB,EACjB,cAAsB,EAC/B,OAAgB;QAEhB,KAAK,CAAC,OAAO,IAAI,kBAAkB,SAAS,eAAe,cAAc,EAAE,CAAC,CAAC;QAJpE,cAAS,GAAT,SAAS,CAAQ;QACjB,mBAAc,GAAd,cAAc,CAAQ;IAIjC,CAAC;CACF"}

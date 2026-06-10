@@ -1,7 +1,8 @@
 import type { Pool } from 'pg';
 import type { Env } from '../config/env.js';
 import type { ChainClients } from './chain/viem-client.js';
-import { getSafeBlockNumber } from './chain/viem-client.js';
+import { getSafeBlockNumber, getFinalizedBlockNumber } from './chain/viem-client.js';
+import { Erc20BalanceRewinder, NftHoldingRewinder } from '../wallet/materialization-rewinder.js';
 import { ContractRepo } from './db/contract-repo.js';
 import { CheckpointRepo } from './db/checkpoint-repo.js';
 import { ChainStateRepo } from './db/chain-state-repo.js';
@@ -39,6 +40,7 @@ export class IndexerApp {
   // NFT
   private readonly nftTransferRepo: NftTransferRepo;
   private readonly nftPartitionService: PartitionService;
+  private nftReorgService: ReorgService | null = null;
 
   constructor(
     private readonly pool: Pool,
@@ -66,6 +68,7 @@ export class IndexerApp {
   async run(): Promise<void> {
     await this.chainStateRepo.ensureInitialized(this.env.CHAIN_ID);
     await this.chainStateRepo.syncFromContractMinOnPool(this.env.CHAIN_ID);
+    await this.updateFinalizedBlock();
 
     const safeLatest = await getSafeBlockNumber(this.chain.http, this.env.CONFIRMATION_DEPTH);
     await Promise.all([
@@ -81,7 +84,7 @@ export class IndexerApp {
       this.env.PARTITION_ENSURE_INTERVAL_MS
     );
     this.reorgTimer = setInterval(
-      () => void this.erc20ReorgService?.scanAndRepair(), 
+      () => void this.runReorgScanTick(),
       this.env.REORG_SCAN_INTERVAL_MS
     );
 
@@ -128,6 +131,7 @@ export class IndexerApp {
         drainWrites: () => writeCoordinator.drain(),
       },
       'erc20',
+      [new Erc20BalanceRewinder()],
     );
     this.erc20ReorgService = reorgService;
 
@@ -189,7 +193,9 @@ export class IndexerApp {
         drainWrites: () => writeCoordinator.drain(),
       },
       'nft',
+      [new NftHoldingRewinder()],
     );
+    this.nftReorgService = reorgService;
 
     const backfill = new NftBackfillService(
       this.env, this.chain.http, writeCoordinator, persistService, reorgService, this.nftTransferRepo,
@@ -229,8 +235,20 @@ export class IndexerApp {
         this.erc20PartitionService.ensureThroughWithBuffer(safeLatest),
         this.nftPartitionService.ensureThroughWithBuffer(safeLatest),
       ]);
+      await this.updateFinalizedBlock();
     } catch (err) {
       logger.error({ err }, '定时预创建热分区失败');
     }
+  }
+
+  /** 拉取链上真正最终化块号写入 indexer_chain_state，供物化 worker 作安全上界。 */
+  private async updateFinalizedBlock(): Promise<void> {
+    const finalized = await getFinalizedBlockNumber(this.chain.http, this.env);
+    await this.chainStateRepo.setFinalizedBlock(this.env.CHAIN_ID, finalized);
+  }
+
+  private async runReorgScanTick(): Promise<void> {
+    await this.erc20ReorgService?.scanAndRepair();
+    await this.nftReorgService?.scanAndRepair();
   }
 }

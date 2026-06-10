@@ -6,7 +6,7 @@ export class ChainStateRepo {
 
   async ensureInitialized(chainId: number): Promise<void> {
     await this.pool.query(
-      `INSERT INTO indexer_chain_state (chain_id, last_finalized_block)
+      `INSERT INTO indexer_chain_state (chain_id, min_indexed_checkpoint)
        VALUES ($1, 0) ON CONFLICT (chain_id) DO NOTHING`,
       [chainId],
     );
@@ -15,15 +15,16 @@ export class ChainStateRepo {
   async get(chainId: number): Promise<ChainState> {
     await this.ensureInitialized(chainId);
     const { rows } = await this.pool.query(
-      `SELECT chain_id, last_finalized_block, last_finalized_block_hash
+      `SELECT chain_id, min_indexed_checkpoint, min_indexed_checkpoint_hash, finalized_block
        FROM indexer_chain_state WHERE chain_id=$1`,
       [chainId],
     );
     const r = rows[0];
     return {
       chainId: r.chain_id,
-      lastFinalizedBlock: BigInt(r.last_finalized_block),
-      lastFinalizedBlockHash: r.last_finalized_block_hash ?? null,
+      minIndexedCheckpoint: BigInt(r.min_indexed_checkpoint),
+      minIndexedCheckpointHash: r.min_indexed_checkpoint_hash ?? null,
+      finalizedBlock: BigInt(r.finalized_block ?? 0),
     };
   }
 
@@ -35,9 +36,20 @@ export class ChainStateRepo {
   ): Promise<void> {
     await client.query(
       `UPDATE indexer_chain_state
-       SET last_finalized_block=$2, last_finalized_block_hash=$3, updated_at=NOW()
+       SET min_indexed_checkpoint=$2, min_indexed_checkpoint_hash=$3, updated_at=NOW()
        WHERE chain_id=$1`,
       [chainId, blockNumber.toString(), blockHash],
+    );
+  }
+
+  /** 写入链上真正最终化的块号（来自 RPC finalized 标签或回退值）。 */
+  async setFinalizedBlock(chainId: number, blockNumber: bigint): Promise<void> {
+    await this.ensureInitialized(chainId);
+    await this.pool.query(
+      `UPDATE indexer_chain_state
+       SET finalized_block=GREATEST(finalized_block, $2), updated_at=NOW()
+       WHERE chain_id=$1`,
+      [chainId, blockNumber.toString()],
     );
   }
 
@@ -75,7 +87,7 @@ export class ChainStateRepo {
 
     await client.query(
       `UPDATE indexer_chain_state
-       SET last_finalized_block=$2, last_finalized_block_hash=$3, updated_at=NOW()
+       SET min_indexed_checkpoint=$2, min_indexed_checkpoint_hash=$3, updated_at=NOW()
        WHERE chain_id=$1`,
       [chainId, minBlock, hash.rows[0]?.block_hash ?? null],
     );

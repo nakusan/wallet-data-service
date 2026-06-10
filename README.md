@@ -464,12 +464,13 @@ CREATE TABLE request_audit_2026_09
 
 **监控关键指标**
 
-- `balance_sync_state.last_synced_block` vs `indexer_chain_state.last_finalized_block`：差值过大说明 SyncWorker 积压
-- `indexer_checkpoints` 各合约进度：落后于 `last_finalized_block` 说明回填未完成
+- `balance_sync_state.last_synced_block` vs `indexer_chain_state.min_indexed_checkpoint`：差值过大说明 SyncWorker 积压
+- `indexer_chain_state.finalized_block` vs `latest`：物化 worker 的安全上界，落后过多说明 finalized 推进异常
+- `indexer_checkpoints` 各合约进度：落后于 `min_indexed_checkpoint` 说明回填未完成
 - Redis 命中率：`INFO stats` 中的 `keyspace_hits / (keyspace_hits + keyspace_misses)`
 
 **热/温层归档**
 
-当热层某个分区的所有块均已被 indexer 扫过（`last_finalized_block > partition.blockTo`），可通过 PartitionService 将其迁移到 `archive` schema，释放热层空间。
+当热层某个分区的所有块均已被 indexer 扫过（`min_indexed_checkpoint > partition.blockTo`），可通过 PartitionService 将其迁移到 `archive` schema，释放热层空间。
 
 ---

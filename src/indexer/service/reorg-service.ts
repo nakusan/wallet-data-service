@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from 'pg';
 import type { PublicClient } from 'viem';
 import type { Env } from '../../config/env.js';
 import { ReorgDetectedError } from '../domain/errors.js';
+import { MATERIALIZATION_LOCK_CLASS } from '../../config/constants.js';
 import type { IndexerType, MonitoredContract } from '../domain/types.js';
 import { BlockReader } from '../chain/block-reader.js';
 import { getSafeBlockNumber } from '../chain/viem-client.js';
@@ -28,6 +29,15 @@ export interface ReorgableRepo {
   ): Promise<number>;
 }
 
+/**
+ * 物化层（token_balances / nft_holdings）的 reorg 回滚器。
+ * 在 reorg 修复事务内执行：回退物化水位线并修正受影响快照，保证物化层与
+ * 重新回填后的事件层最终一致。实现位于 wallet 模块，按 indexerType 注入。
+ */
+export interface MaterializationRewinder {
+  rewindForReorg(client: PoolClient, chainId: number, commonAncestor: bigint): Promise<void>;
+}
+
 export interface BackfillServiceLike {
   fillSegmented(contract: MonitoredContract, fromBlock: bigint, toBlock: bigint): Promise<void>;
 }
@@ -50,6 +60,7 @@ export class ReorgService {
     private readonly writeCoordinator: ContractWriteCoordinator,
     private readonly hooks: ReorgLifecycleHooks,
     private readonly indexerType: IndexerType,
+    private readonly rewinders: MaterializationRewinder[] = [],
   ) {
     this.blockReader = new BlockReader(this.httpClient);
   }
@@ -62,7 +73,7 @@ export class ReorgService {
     if (this.handling) return;
     await this.chainStateRepo.syncFromContractMinOnPool(this.env.CHAIN_ID);
     const chainState = await this.chainStateRepo.get(this.env.CHAIN_ID);
-    const scanHigh = chainState.lastFinalizedBlock;
+    const scanHigh = chainState.minIndexedCheckpoint;
     if (scanHigh <= 0n) return;
 
     const ancestor = await this.detectFork(this.env.CHAIN_ID, scanHigh);
@@ -108,6 +119,11 @@ export class ReorgService {
         const client = await this.pool.connect();
         try {
           await client.query('BEGIN');
+          // 与 SyncWorker 互斥：避免 reorg 回滚与物化同步交错读到半成品状态
+          await client.query('SELECT pg_advisory_xact_lock($1, $2)', [
+            MATERIALIZATION_LOCK_CLASS,
+            this.env.CHAIN_ID,
+          ]);
           for (const contract of contracts) {
             for (const repo of this.repos) {
               await repo.markReorgedAfterBlock(
@@ -118,6 +134,10 @@ export class ReorgService {
               client, contract.chainId, contract.address,
               this.indexerType, commonAncestor, ancestorHash,
             );
+          }
+          // 回滚物化层：回退水位线并修正受影响余额/持有快照（与事件层同事务，原子提交）
+          for (const rewinder of this.rewinders) {
+            await rewinder.rewindForReorg(client, this.env.CHAIN_ID, commonAncestor);
           }
           await this.blockAnchorRepo.deleteAfter(client, this.env.CHAIN_ID, commonAncestor);
           await this.chainStateRepo.rewindTo(client, this.env.CHAIN_ID, commonAncestor, ancestorHash);
@@ -130,14 +150,15 @@ export class ReorgService {
           client.release();
         }
 
-        const finalized = await getSafeBlockNumber(this.httpClient, this.env.CONFIRMATION_DEPTH);
+        // 确认深度上界（非链上真正 finalized），reorg 回滚后据此重填到安全高度。
+        const safeUpper = await getSafeBlockNumber(this.httpClient, this.env.CONFIRMATION_DEPTH);
         const backfill = this.backfill;
         if (!backfill) { logger.error('BackfillService 未注入'); return; }
 
         for (const contract of contracts) {
           const from = commonAncestor + 1n;
-          if (from <= finalized) {
-            await backfill.fillSegmented(contract, from, finalized);
+          if (from <= safeUpper) {
+            await backfill.fillSegmented(contract, from, safeUpper);
           }
         }
         logger.info({ commonAncestor: commonAncestor.toString() }, 'reorg_backfill_completed');
