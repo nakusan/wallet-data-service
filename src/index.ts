@@ -15,7 +15,7 @@ async function main() {
   const redis = getRedis();
   const chain = createChainClients(env);
 
-  // Indexer（ERC20 + NFT + Native）
+  // Indexer（ERC20 + NFT）
   const indexerApp = new IndexerApp(pool, env, chain);
 
   // 余额物化同步 Workers

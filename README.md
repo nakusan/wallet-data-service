@@ -39,13 +39,12 @@
 │  ┌─────────────────────────────────────────────────────┐    │
 │  │  IndexerApp                                          │    │
 │  │  ├── ERC20 Indexer  (BackfillService + LiveWatcher) │    │
-│  │  ├── NFT Indexer    (BackfillService + LiveWatcher) │    │
-│  │  └── Native Indexer (BlockScanner, 无订阅模式)       │    │
+│  │  └── NFT Indexer    (BackfillService + LiveWatcher) │    │
 │  └─────────────────────────────────────────────────────┘    │
 │                        │ 写入                                │
 │  ┌─────────────────────────────────────────────────────┐    │
 │  │  PostgreSQL（分区表）                                  │    │
-│  │  token_transfers / nft_transfers / native_transfers  │    │
+│  │  token_transfers / nft_transfers                     │    │
 │  └─────────────────────────────────────────────────────┘    │
 │                        │ 增量消费                            │
 │  ┌────────────────────────────────────────┐                 │
@@ -82,7 +81,6 @@
 |------|------|
 | `nft_transfers` | NFT 转账热层，`batch_index` 字段区分 TransferBatch 展开行 |
 | `archive.nft_transfers` | NFT 转账温层 |
-| `native_transfers` | 原生币转账记录（来自块扫描，仅记录成功交易） |
 
 ### 钱包服务表（新增）
 
@@ -100,20 +98,19 @@
 
 ```
 wallet-data-service/
-├── migrations/                  # 15 个 SQL 文件，顺序执行
+├── migrations/                  # 16 个 SQL 文件，顺序执行
 ├── scripts/
 │   └── migrate.ts               # 启动时自动执行未跑的 migration
 ├── src/
 │   ├── config/
 │   │   ├── env.ts               # zod 环境变量校验
-│   │   └── constants.ts         # ABI、常量（含 NATIVE_SENTINEL_ADDRESS）
+│   │   └── constants.ts         # ABI、常量
 │   ├── indexer/
 │   │   ├── domain/              # types.ts、errors.ts
 │   │   ├── shared/              # 共用基础设施（repos, reorg, partition...）
 │   │   ├── erc20/               # ERC20 索引器（继承 chain-indexer）
 │   │   ├── nft/                 # NFT 索引器（ERC721 + ERC1155）
-│   │   ├── native/              # 原生币扫块索引器
-│   │   └── indexer-app.ts       # 统一启动类（协调三条流水线）
+│   │   └── indexer-app.ts       # 统一启动类（协调 ERC20 / NFT 两条流水线）
 │   ├── wallet/
 │   │   ├── balance-sync-worker.ts      # ERC20 余额增量同步
 │   │   ├── nft-holding-sync-worker.ts  # NFT 持有增量同步

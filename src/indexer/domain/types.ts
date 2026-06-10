@@ -1,5 +1,5 @@
 export type TokenType = 'ERC20' | 'ERC721' | 'ERC1155';
-export type IndexerType = 'erc20' | 'nft' | 'native';
+export type IndexerType = 'erc20' | 'nft';
 
 export interface MonitoredContract {
   id: number;
@@ -39,18 +39,6 @@ export interface NftTransferRecord {
   fromAddress: string;
   toAddress: string;
   amount: bigint;
-}
-
-export interface NativeTransferRecord {
-  chainId: number;
-  txHash: string;
-  blockNumber: bigint;
-  blockTimestamp: Date | null;
-  txIndex: number;
-  fromAddress: string;
-  toAddress: string;
-  valueRaw: string;
-  valueEth: string;
 }
 
 export interface Checkpoint {

@@ -17,9 +17,6 @@ import { Erc20LiveWatcher } from './erc20/live-watcher.js';
 import { NftTransferRepo } from './nft/transfer-repo.js';
 import { NftBackfillService } from './nft/backfill-service.js';
 import { NftLiveWatcher } from './nft/live-watcher.js';
-import { NativeTransferRepo } from './native/transfer-repo.js';
-import { NativeBackfillService } from './native/backfill-service.js';
-import { NATIVE_SENTINEL_ADDRESS } from '../config/constants.js';
 import type { NftTransferRecord, TransferRecord } from './domain/types.js';
 import { logger } from '../infrastructure/logger/logger.js';
 
@@ -43,10 +40,6 @@ export class IndexerApp {
   private readonly nftTransferRepo: NftTransferRepo;
   private readonly nftPartitionService: PartitionService;
 
-  // Native
-  private readonly nativeTransferRepo: NativeTransferRepo;
-  private readonly nativePartitionService: PartitionService;
-
   constructor(
     private readonly pool: Pool,
     private readonly env: Env,
@@ -68,12 +61,6 @@ export class IndexerApp {
       new PartitionRepo(pool, 'nft_transfers'),
       BigInt(env.PARTITION_BLOCK_RANGE),
     );
-
-    this.nativeTransferRepo = new NativeTransferRepo(pool);
-    this.nativePartitionService = new PartitionService(
-      new PartitionRepo(pool, 'native_transfers'),
-      BigInt(env.PARTITION_BLOCK_RANGE),
-    );
   }
 
   async run(): Promise<void> {
@@ -84,12 +71,10 @@ export class IndexerApp {
     await Promise.all([
       this.erc20PartitionService.ensureThroughWithBuffer(safeLatest),
       this.nftPartitionService.ensureThroughWithBuffer(safeLatest),
-      this.nativePartitionService.ensureThroughWithBuffer(safeLatest),
     ]);
 
     await this.runErc20(safeLatest);
     await this.runNft(safeLatest);
-    await this.runNative(safeLatest);
 
     this.partitionTimer = setInterval(
       () => void this.runPartitionEnsureTick(), 
@@ -100,7 +85,7 @@ export class IndexerApp {
       this.env.REORG_SCAN_INTERVAL_MS
     );
 
-    logger.info({ safeLatest: safeLatest.toString() }, '索引器（ERC20+NFT+Native）已启动');
+    logger.info({ safeLatest: safeLatest.toString() }, '索引器（ERC20+NFT）已启动');
   }
 
   async shutdown(): Promise<void> {
@@ -237,32 +222,12 @@ export class IndexerApp {
     liveWatcher.start(contracts, resumeFrom);
   }
 
-  private async runNative(safeLatest: bigint): Promise<void> {
-    const stored = await this.checkpointRepo.get(
-      this.env.CHAIN_ID, NATIVE_SENTINEL_ADDRESS, 'native',
-    );
-    const start = stored != null ? stored + 1n
-      : (safeLatest - 100n > 0n ? safeLatest - 100n : 0n);
-
-    if (start > safeLatest) { logger.info('Native indexer 已是最新'); return; }
-
-    const nativeBackfill = new NativeBackfillService(
-      this.pool, this.env, this.chain.http,
-      this.nativeTransferRepo, this.checkpointRepo, this.blockAnchorRepo,
-      this.chainStateRepo, this.nativePartitionService,
-    );
-    await nativeBackfill.fillRange(start, safeLatest);
-    logger.info({ from: start.toString(), to: safeLatest.toString() }, 'Native 回填完成');
-    // 注意：Native 没有订阅模式，依赖 IndexerApp 定期调用 runNative 推进
-  }
-
   private async runPartitionEnsureTick(): Promise<void> {
     try {
       const safeLatest = await getSafeBlockNumber(this.chain.http, this.env.CONFIRMATION_DEPTH);
       await Promise.all([
         this.erc20PartitionService.ensureThroughWithBuffer(safeLatest),
         this.nftPartitionService.ensureThroughWithBuffer(safeLatest),
-        this.nativePartitionService.ensureThroughWithBuffer(safeLatest),
       ]);
     } catch (err) {
       logger.error({ err }, '定时预创建热分区失败');
