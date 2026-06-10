@@ -92,7 +92,9 @@ export class Erc20LiveWatcher {
     this.reconnectAttempt += 1;
     this.stopWatching();
     await this.writeCoordinator.drain();
-    try { await this.onMiniBackfill(); } catch (err) {
+    try { 
+      await this.onMiniBackfill(); 
+    } catch (err) {
       logger.error({ err }, 'mini-backfill 失败');
     }
     if (!this.shouldRun) { this.state = LiveState.STOPPED; return; }
