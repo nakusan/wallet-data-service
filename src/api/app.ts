@@ -45,7 +45,7 @@ export function buildExpressApp(
   const txService = new TxHistoryService(pool, contractRepo);
   const holdersService = new HoldersService(pool, cache, contractRepo, env.CHAIN_ID);
 
-  app.use('/v1/auth', authRouter(pool));
+  app.use('/v1/auth', authRouter(pool, redis));
   app.use('/v1', balancesRouter(balanceService, redis));
   app.use('/v1', nftsRouter(balanceService, redis));
   app.use('/v1', transactionsRouter(txService, redis));

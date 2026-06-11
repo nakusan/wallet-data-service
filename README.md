@@ -91,7 +91,7 @@
 | `nft_holdings` | NFT 持有快照，由 NftHoldingSyncWorker 维护 |
 | `balance_sync_state` | 物化水位线（按合约 × sync_type，支持进程重启续跑与运行期新增合约 catch-up） |
 | `api_keys` | API Key 管理，`key_hash = SHA-256(raw_key)`，明文不落库 |
-| `request_audit` | API 请求审计日志（按月分区） |
+| `request_audit` | 预留表（暂未启用） |
 
 ---
 
@@ -216,7 +216,7 @@ pnpm build && pnpm start
 
 ## REST API 文档
 
-所有接口（除 `/v1/auth/token` 和 `/v1/health`）均需携带 JWT。
+所有接口（除 `/v1/auth/token`、`/v1/health`）均需携带 JWT；`/v1/auth/revoke` 需携带待注销的 JWT。
 
 ### 认证
 
@@ -237,6 +237,15 @@ Content-Type: application/json
 ```
 Authorization: Bearer eyJ...
 ```
+
+**注销当前 JWT**
+
+```http
+POST /v1/auth/revoke
+Authorization: Bearer eyJ...
+```
+
+成功返回 `204`，该 token 立即失效；再次使用返回 `401 token_revoked`。
 
 ---
 
@@ -455,7 +464,7 @@ GET /v1/health
 
 ### JWT 撤销
 
-撤销的 JWT 的 `jti` 写入 Redis Set `jwt:revoked`，TTL = 原 JWT 剩余有效期。每次请求验证前查询此 Set，实现无状态 JWT 的主动注销能力。
+撤销的 JWT 的 `jti` 写入 Redis key `jwt:revoked:{jti}`，TTL = 原 JWT 剩余有效期。每次请求验证前查询该 key，实现无状态 JWT 的主动注销能力。
 
 ---
 
@@ -470,15 +479,6 @@ GET /v1/health
 ---
 
 ## 生产运维建议
-
-**定期维护 Migration 分区**
-
-`request_audit` 按月分区，每月需提前创建下月分区：
-```sql
-CREATE TABLE request_audit_2026_09
-  PARTITION OF request_audit
-  FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
-```
 
 **监控关键指标**
 

@@ -51,14 +51,6 @@ export class CacheService {
     if (count === 1) await this.redis.expire(key, windowSec);
     return count;
   }
-
-  async addToSet(key: string, member: string): Promise<void> {
-    await this.redis.sadd(key, member);
-  }
-
-  async isMemberOfSet(key: string, member: string): Promise<boolean> {
-    return (await this.redis.sismember(key, member)) === 1;
-  }
 }
 
 export const CacheKeys = {
@@ -70,5 +62,5 @@ export const CacheKeys = {
     `holders:${chainId}:${contract.toLowerCase()}:${n}`,
   nativeBalance: (chainId: number, addr: string) =>
     `native:${chainId}:${addr.toLowerCase()}`,
-  jwtRevoked: 'jwt:revoked',
+  jwtRevoked: (jti: string) => `jwt:revoked:${jti}`,
 } as const;
