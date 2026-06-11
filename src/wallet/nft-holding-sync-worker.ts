@@ -3,8 +3,10 @@ import type Redis from 'ioredis';
 import { ZERO_ADDRESS, MATERIALIZATION_LOCK_CLASS } from '../config/constants.js';
 import { CacheKeys } from '../infrastructure/cache/redis-client.js';
 import { logger } from '../infrastructure/logger/logger.js';
+import { BalanceSyncStateRepo } from './balance-sync-state-repo.js';
 
 const BATCH_BLOCKS = 2000n;
+const MAX_CONTRACTS_PER_TICK = 10;
 
 interface NftTransferRow {
   contract_address: string;
@@ -19,6 +21,7 @@ interface NftTransferRow {
 export class NftHoldingSyncWorker {
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private readonly syncStateRepo = new BalanceSyncStateRepo();
 
   constructor(
     private readonly pool: Pool,
@@ -34,9 +37,9 @@ export class NftHoldingSyncWorker {
   }
 
   stop(): void {
-    if (this.timer) { 
-      clearInterval(this.timer); 
-      this.timer = null; 
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
     }
   }
 
@@ -55,6 +58,7 @@ export class NftHoldingSyncWorker {
   private async sync(): Promise<void> {
     const client = await this.pool.connect();
     const affectedAddrs = new Set<string>();
+    let syncedCount = 0;
     try {
       await client.query('BEGIN');
       // 与 ReorgService 回滚互斥
@@ -63,61 +67,69 @@ export class NftHoldingSyncWorker {
         this.chainId,
       ]);
 
-      const { rows: stateRows } = await client.query(
-        `SELECT last_synced_block FROM balance_sync_state
-         WHERE chain_id=$1 AND sync_type='nft' FOR UPDATE`,
-        [this.chainId],
-      );
-      const lastSynced = BigInt(stateRows[0]?.last_synced_block ?? 0);
-
-      // 上界 = LEAST(indexer 写入进度, 链上真正最终化块号)
       const { rows: chainRows } = await client.query(
         `SELECT LEAST(min_indexed_checkpoint, finalized_block) AS safe_upper
          FROM indexer_chain_state WHERE chain_id=$1`,
         [this.chainId],
       );
-      const finalized = BigInt(chainRows[0]?.safe_upper ?? 0);
-      if (lastSynced >= finalized) {
+      const safeUpper = BigInt(chainRows[0]?.safe_upper ?? 0);
+
+      const lagging = await this.syncStateRepo.pickLaggingNft(
+        client, this.chainId, safeUpper, MAX_CONTRACTS_PER_TICK,
+      );
+      if (lagging.length === 0) {
         await client.query('COMMIT');
         return;
       }
 
-      const fromBlock = lastSynced + 1n;
-      const toBlock = fromBlock + BATCH_BLOCKS - 1n <= finalized ? fromBlock + BATCH_BLOCKS - 1n : finalized;
+      for (const { contractAddress, lastSynced } of lagging) {
+        const fromBlock = lastSynced + 1n;
+        if (fromBlock > safeUpper) continue;
 
-      const { rows } = await client.query<NftTransferRow>(
-        `SELECT contract_address, token_id, token_standard,
-                from_address, to_address, amount, block_number
-         FROM (
-           SELECT contract_address, token_id, token_standard, from_address,
-                  to_address, amount, block_number, log_index, batch_index
-           FROM nft_transfers
-           WHERE chain_id=$1 AND status='indexed'
-             AND block_number BETWEEN $2 AND $3
-           UNION ALL
-           SELECT contract_address, token_id, token_standard, from_address,
-                  to_address, amount, block_number, log_index, batch_index
-           FROM archive.nft_transfers
-           WHERE chain_id=$1 AND status='indexed'
-             AND block_number BETWEEN $2 AND $3
-         ) t
-         ORDER BY block_number, log_index, batch_index`,
-        [this.chainId, fromBlock.toString(), toBlock.toString()],
-      );
+        const toBlock = fromBlock + BATCH_BLOCKS - 1n <= safeUpper
+          ? fromBlock + BATCH_BLOCKS - 1n
+          : safeUpper;
 
-      for (const row of rows) {
-        await this.applyTransfer(client, row, toBlock);
-        affectedAddrs.add(row.from_address);
-        affectedAddrs.add(row.to_address);
+        const { rows } = await client.query<NftTransferRow>(
+          `SELECT contract_address, token_id, token_standard,
+                  from_address, to_address, amount, block_number
+           FROM (
+             SELECT contract_address, token_id, token_standard, from_address,
+                    to_address, amount, block_number, log_index, batch_index
+             FROM nft_transfers
+             WHERE chain_id=$1 AND contract_address=$2 AND status='indexed'
+               AND block_number BETWEEN $3 AND $4
+             UNION ALL
+             SELECT contract_address, token_id, token_standard, from_address,
+                    to_address, amount, block_number, log_index, batch_index
+             FROM archive.nft_transfers
+             WHERE chain_id=$1 AND contract_address=$2 AND status='indexed'
+               AND block_number BETWEEN $3 AND $4
+           ) t
+           ORDER BY block_number, log_index, batch_index`,
+          [this.chainId, contractAddress.toLowerCase(), fromBlock.toString(), toBlock.toString()],
+        );
+
+        for (const row of rows) {
+          await this.applyTransfer(client, row, toBlock);
+          affectedAddrs.add(row.from_address);
+          affectedAddrs.add(row.to_address);
+        }
+
+        await this.syncStateRepo.setLastSynced(
+          client, this.chainId, contractAddress, 'nft', toBlock,
+        );
+        syncedCount += rows.length;
+        logger.debug(
+          { contract: contractAddress, from: fromBlock.toString(), to: toBlock.toString(), count: rows.length },
+          'NFT 持有同步完成',
+        );
       }
-      await client.query(
-        `UPDATE balance_sync_state
-         SET last_synced_block=$1, updated_at=NOW()
-         WHERE chain_id=$2 AND sync_type='nft'`,
-        [toBlock.toString(), this.chainId],
-      );
+
       await client.query('COMMIT');
-      if (rows.length > 0) logger.debug({ from: fromBlock.toString(), to: toBlock.toString(), count: rows.length }, 'NFT 持有同步完成');
+      if (syncedCount > 0) {
+        logger.debug({ count: syncedCount }, 'NFT 持有同步批次完成');
+      }
 
       const keys = [...affectedAddrs].map((a) => CacheKeys.nftHoldings(this.chainId, a));
       if (keys.length > 0) await this.redis.del(...keys);

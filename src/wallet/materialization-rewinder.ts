@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 import { ZERO_ADDRESS } from '../config/constants.js';
 import type { MaterializationRewinder } from '../indexer/service/reorg-service.js';
 import { logger } from '../infrastructure/logger/logger.js';
+import { BalanceSyncStateRepo } from './balance-sync-state-repo.js';
 
 /**
  * ERC20 余额物化的 reorg 回滚器。
@@ -10,13 +11,15 @@ import { logger } from '../infrastructure/logger/logger.js';
  * （commonAncestor 之后的行翻成 'reorged'）之后调用。
  *
  * 策略（正确性优先的「受影响 holder 全量重算」）：
- *  1. 若物化水位线未越过 commonAncestor，说明这些块尚未被计入快照，直接返回。
+ *  1. 若所有合约物化水位均未越过 commonAncestor，说明这些块尚未被计入快照，直接返回。
  *  2. 否则定位「commonAncestor 之后出现过的所有 (contract, holder)」，
  *     删除其快照后，基于 status='indexed' 且 block_number<=commonAncestor 的全量
  *     （public ∪ archive）重算余额。
- *  3. 回退水位线到 commonAncestor，由前向 SyncWorker 重放修正后的区间。
+ *  3. 将所有越过 commonAncestor 的合约水位回退到 commonAncestor，由 SyncWorker 重放修正后的区间。
  */
 export class Erc20BalanceRewinder implements MaterializationRewinder {
+  private readonly syncStateRepo = new BalanceSyncStateRepo();
+
   async rewindForReorg(
     client: PoolClient,
     chainId: number,
@@ -24,13 +27,8 @@ export class Erc20BalanceRewinder implements MaterializationRewinder {
   ): Promise<void> {
     const anchor = commonAncestor.toString();
 
-    const { rows } = await client.query(
-      `SELECT last_synced_block FROM balance_sync_state
-       WHERE chain_id=$1 AND sync_type='erc20' FOR UPDATE`,
-      [chainId],
-    );
-    const lastSynced = BigInt(rows[0]?.last_synced_block ?? 0);
-    if (lastSynced <= commonAncestor) return;
+    const needsRewind = await this.syncStateRepo.hasAnyAbove(client, chainId, 'erc20', commonAncestor);
+    if (!needsRewind) return;
 
     // 受影响 holder：commonAncestor 之后任何转账涉及的 from/to（public ∪ archive）
     const affectedCte = `
@@ -107,15 +105,10 @@ export class Erc20BalanceRewinder implements MaterializationRewinder {
       [chainId, anchor, ZERO_ADDRESS],
     );
 
-    await client.query(
-      `UPDATE balance_sync_state
-       SET last_synced_block=$1, updated_at=NOW()
-       WHERE chain_id=$2 AND sync_type='erc20'`,
-      [anchor, chainId],
-    );
+    await this.syncStateRepo.rewindAllAbove(client, chainId, 'erc20', commonAncestor);
 
     logger.warn(
-      { commonAncestor: anchor, previousSynced: lastSynced.toString() },
+      { commonAncestor: anchor },
       'erc20 余额物化已随 reorg 回滚并重算受影响 holder',
     );
   }
@@ -130,6 +123,8 @@ export class Erc20BalanceRewinder implements MaterializationRewinder {
  * 排除零地址，保留净额>0 的持有者。
  */
 export class NftHoldingRewinder implements MaterializationRewinder {
+  private readonly syncStateRepo = new BalanceSyncStateRepo();
+
   async rewindForReorg(
     client: PoolClient,
     chainId: number,
@@ -137,13 +132,8 @@ export class NftHoldingRewinder implements MaterializationRewinder {
   ): Promise<void> {
     const anchor = commonAncestor.toString();
 
-    const { rows } = await client.query(
-      `SELECT last_synced_block FROM balance_sync_state
-       WHERE chain_id=$1 AND sync_type='nft' FOR UPDATE`,
-      [chainId],
-    );
-    const lastSynced = BigInt(rows[0]?.last_synced_block ?? 0);
-    if (lastSynced <= commonAncestor) return;
+    const needsRewind = await this.syncStateRepo.hasAnyAbove(client, chainId, 'nft', commonAncestor);
+    if (!needsRewind) return;
 
     const affectedCte = `
       affected AS (
@@ -211,15 +201,10 @@ export class NftHoldingRewinder implements MaterializationRewinder {
       [chainId, anchor, ZERO_ADDRESS],
     );
 
-    await client.query(
-      `UPDATE balance_sync_state
-       SET last_synced_block=$1, updated_at=NOW()
-       WHERE chain_id=$2 AND sync_type='nft'`,
-      [anchor, chainId],
-    );
+    await this.syncStateRepo.rewindAllAbove(client, chainId, 'nft', commonAncestor);
 
     logger.warn(
-      { commonAncestor: anchor, previousSynced: lastSynced.toString() },
+      { commonAncestor: anchor },
       'nft 持有快照已随 reorg 回滚并重算受影响 token',
     );
   }

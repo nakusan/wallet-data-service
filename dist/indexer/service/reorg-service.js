@@ -111,7 +111,8 @@ export class ReorgService {
                 finally {
                     client.release();
                 }
-                const finalized = await getSafeBlockNumber(this.httpClient, this.env.CONFIRMATION_DEPTH);
+                // 确认深度上界（非链上真正 finalized），reorg 回滚后据此重填到安全高度。
+                const safeUpper = await getSafeBlockNumber(this.httpClient, this.env.CONFIRMATION_DEPTH);
                 const backfill = this.backfill;
                 if (!backfill) {
                     logger.error('BackfillService 未注入');
@@ -119,8 +120,8 @@ export class ReorgService {
                 }
                 for (const contract of contracts) {
                     const from = commonAncestor + 1n;
-                    if (from <= finalized) {
-                        await backfill.fillSegmented(contract, from, finalized);
+                    if (from <= safeUpper) {
+                        await backfill.fillSegmented(contract, from, safeUpper);
                     }
                 }
                 logger.info({ commonAncestor: commonAncestor.toString() }, 'reorg_backfill_completed');

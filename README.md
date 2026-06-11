@@ -88,7 +88,7 @@
 |------|------|
 | `token_balances` | ERC20 余额物化快照，由 BalanceSyncWorker 维护 |
 | `nft_holdings` | NFT 持有快照，由 NftHoldingSyncWorker 维护 |
-| `balance_sync_state` | 两个 SyncWorker 的水位线持久化（支持进程重启续跑） |
+| `balance_sync_state` | 物化水位线（按合约 × sync_type，支持进程重启续跑与运行期新增合约 catch-up） |
 | `api_keys` | API Key 管理，`key_hash = SHA-256(raw_key)`，明文不落库 |
 | `request_audit` | API 请求审计日志（按月分区） |
 
@@ -98,7 +98,7 @@
 
 ```
 wallet-data-service/
-├── migrations/                  # 16 个 SQL 文件，顺序执行
+├── migrations/                  # 14 个 SQL 文件，顺序执行
 ├── scripts/
 │   └── migrate.ts               # 启动时自动执行未跑的 migration
 ├── src/
@@ -464,7 +464,7 @@ CREATE TABLE request_audit_2026_09
 
 **监控关键指标**
 
-- `balance_sync_state.last_synced_block` vs `indexer_chain_state.min_indexed_checkpoint`：差值过大说明 SyncWorker 积压
+- `balance_sync_state.last_synced_block`（按合约）vs 对应 `indexer_checkpoints.last_indexed_block`：差值过大说明该合约物化积压
 - `indexer_chain_state.finalized_block` vs `latest`：物化 worker 的安全上界，落后过多说明 finalized 推进异常
 - `indexer_checkpoints` 各合约进度：落后于 `min_indexed_checkpoint` 说明回填未完成
 - Redis 命中率：`INFO stats` 中的 `keyspace_hits / (keyspace_hits + keyspace_misses)`

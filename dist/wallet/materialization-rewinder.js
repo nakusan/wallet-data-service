@@ -1,5 +1,6 @@
 import { ZERO_ADDRESS } from '../config/constants.js';
 import { logger } from '../infrastructure/logger/logger.js';
+import { BalanceSyncStateRepo } from './balance-sync-state-repo.js';
 /**
  * ERC20 余额物化的 reorg 回滚器。
  *
@@ -7,19 +8,18 @@ import { logger } from '../infrastructure/logger/logger.js';
  * （commonAncestor 之后的行翻成 'reorged'）之后调用。
  *
  * 策略（正确性优先的「受影响 holder 全量重算」）：
- *  1. 若物化水位线未越过 commonAncestor，说明这些块尚未被计入快照，直接返回。
+ *  1. 若所有合约物化水位均未越过 commonAncestor，说明这些块尚未被计入快照，直接返回。
  *  2. 否则定位「commonAncestor 之后出现过的所有 (contract, holder)」，
  *     删除其快照后，基于 status='indexed' 且 block_number<=commonAncestor 的全量
  *     （public ∪ archive）重算余额。
- *  3. 回退水位线到 commonAncestor，由前向 SyncWorker 重放修正后的区间。
+ *  3. 将所有越过 commonAncestor 的合约水位回退到 commonAncestor，由 SyncWorker 重放修正后的区间。
  */
 export class Erc20BalanceRewinder {
+    syncStateRepo = new BalanceSyncStateRepo();
     async rewindForReorg(client, chainId, commonAncestor) {
         const anchor = commonAncestor.toString();
-        const { rows } = await client.query(`SELECT last_synced_block FROM balance_sync_state
-       WHERE chain_id=$1 AND sync_type='erc20' FOR UPDATE`, [chainId]);
-        const lastSynced = BigInt(rows[0]?.last_synced_block ?? 0);
-        if (lastSynced <= commonAncestor)
+        const needsRewind = await this.syncStateRepo.hasAnyAbove(client, chainId, 'erc20', commonAncestor);
+        if (!needsRewind)
             return;
         // 受影响 holder：commonAncestor 之后任何转账涉及的 from/to（public ∪ archive）
         const affectedCte = `
@@ -45,22 +45,22 @@ export class Erc20BalanceRewinder {
        delta AS (
          SELECT chain_id, contract_address, to_address AS holder, SUM(amount_raw::NUMERIC) AS d
            FROM token_transfers
-           WHERE chain_id=$1 AND status='indexed' AND block_number<=$2
+           WHERE chain_id=$1 AND status='indexed' AND block_number<=$2 AND to_address<>$3
            GROUP BY chain_id, contract_address, to_address
          UNION ALL
          SELECT chain_id, contract_address, from_address, -SUM(amount_raw::NUMERIC)
            FROM token_transfers
-           WHERE chain_id=$1 AND status='indexed' AND block_number<=$2
+           WHERE chain_id=$1 AND status='indexed' AND block_number<=$2 AND from_address<>$3
            GROUP BY chain_id, contract_address, from_address
          UNION ALL
          SELECT chain_id, contract_address, to_address, SUM(amount_raw::NUMERIC)
            FROM archive.token_transfers
-           WHERE chain_id=$1 AND status='indexed' AND block_number<=$2
+           WHERE chain_id=$1 AND status='indexed' AND block_number<=$2 AND to_address<>$3
            GROUP BY chain_id, contract_address, to_address
          UNION ALL
          SELECT chain_id, contract_address, from_address, -SUM(amount_raw::NUMERIC)
            FROM archive.token_transfers
-           WHERE chain_id=$1 AND status='indexed' AND block_number<=$2
+           WHERE chain_id=$1 AND status='indexed' AND block_number<=$2 AND from_address<>$3
            GROUP BY chain_id, contract_address, from_address
        ),
        net AS (
@@ -81,16 +81,14 @@ export class Erc20BalanceRewinder {
        FROM net n
        JOIN monitored_contracts mc
          ON mc.chain_id=n.chain_id AND mc.address=n.contract_address
-       WHERE n.net_delta > 0
+       WHERE n.net_delta <> 0
        ON CONFLICT (chain_id, contract_address, holder_address) DO UPDATE
          SET balance_raw=EXCLUDED.balance_raw,
              balance=EXCLUDED.balance,
              last_transfer_block=EXCLUDED.last_transfer_block,
-             updated_at=NOW()`, [chainId, anchor]);
-        await client.query(`UPDATE balance_sync_state
-       SET last_synced_block=$1, updated_at=NOW()
-       WHERE chain_id=$2 AND sync_type='erc20'`, [anchor, chainId]);
-        logger.warn({ commonAncestor: anchor, previousSynced: lastSynced.toString() }, 'erc20 余额物化已随 reorg 回滚并重算受影响 holder');
+             updated_at=NOW()`, [chainId, anchor, ZERO_ADDRESS]);
+        await this.syncStateRepo.rewindAllAbove(client, chainId, 'erc20', commonAncestor);
+        logger.warn({ commonAncestor: anchor }, 'erc20 余额物化已随 reorg 回滚并重算受影响 holder');
     }
 }
 /**
@@ -102,12 +100,11 @@ export class Erc20BalanceRewinder {
  * 排除零地址，保留净额>0 的持有者。
  */
 export class NftHoldingRewinder {
+    syncStateRepo = new BalanceSyncStateRepo();
     async rewindForReorg(client, chainId, commonAncestor) {
         const anchor = commonAncestor.toString();
-        const { rows } = await client.query(`SELECT last_synced_block FROM balance_sync_state
-       WHERE chain_id=$1 AND sync_type='nft' FOR UPDATE`, [chainId]);
-        const lastSynced = BigInt(rows[0]?.last_synced_block ?? 0);
-        if (lastSynced <= commonAncestor)
+        const needsRewind = await this.syncStateRepo.hasAnyAbove(client, chainId, 'nft', commonAncestor);
+        if (!needsRewind)
             return;
         const affectedCte = `
       affected AS (
@@ -166,10 +163,8 @@ export class NftHoldingRewinder {
          SET amount=EXCLUDED.amount,
              last_transfer_block=EXCLUDED.last_transfer_block,
              updated_at=NOW()`, [chainId, anchor, ZERO_ADDRESS]);
-        await client.query(`UPDATE balance_sync_state
-       SET last_synced_block=$1, updated_at=NOW()
-       WHERE chain_id=$2 AND sync_type='nft'`, [anchor, chainId]);
-        logger.warn({ commonAncestor: anchor, previousSynced: lastSynced.toString() }, 'nft 持有快照已随 reorg 回滚并重算受影响 token');
+        await this.syncStateRepo.rewindAllAbove(client, chainId, 'nft', commonAncestor);
+        logger.warn({ commonAncestor: anchor }, 'nft 持有快照已随 reorg 回滚并重算受影响 token');
     }
 }
 //# sourceMappingURL=materialization-rewinder.js.map
