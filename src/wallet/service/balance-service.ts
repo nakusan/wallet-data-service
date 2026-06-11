@@ -1,9 +1,12 @@
 import type { Pool } from 'pg';
 import type { PublicClient } from 'viem';
-import { formatEther } from 'viem';
-import type { CacheService } from '../infrastructure/cache/redis-client.js';
-import { CacheKeys } from '../infrastructure/cache/redis-client.js';
-import { withRetry } from '../indexer/util/retry.js';
+import { formatEther, formatUnits } from 'viem';
+import type { CacheService } from '../../infrastructure/cache/redis-client.js';
+import { CacheKeys } from '../../infrastructure/cache/redis-client.js';
+import { withRetry } from '../../indexer/util/retry.js';
+import type { ContractRepo } from '../../indexer/db/contract-repo.js';
+import { erc20BalanceAbi } from '../chain/chain-read-abis.js';
+import { NftChainVerifier } from '../chain/nft-chain-verifier.js';
 
 export interface TokenBalance {
   contractAddress: string;
@@ -30,32 +33,63 @@ export interface NftHolding {
 }
 
 export class BalanceService {
+  private readonly nftVerifier: NftChainVerifier;
+
   constructor(
     private readonly pool: Pool,
     private readonly httpClient: PublicClient,
     private readonly cache: CacheService,
+    private readonly contractRepo: ContractRepo,
     private readonly chainId: number,
     private readonly nativeSymbol: string = 'ETH',
-  ) {}
-
-  async getTokenBalances(address: string): Promise<TokenBalance[]> {
-    const addr = address.toLowerCase();
-    const { rows } = await this.pool.query(
-      `SELECT contract_address, symbol, decimals, balance_raw, balance
-       FROM token_balances
-       WHERE chain_id=$1 AND holder_address=$2 AND balance_raw>0
-       ORDER BY balance_raw DESC`,
-      [this.chainId, addr],
-    );
-    return rows.map((r) => ({
-      contractAddress: r.contract_address,
-      symbol: r.symbol,
-      decimals: r.decimals,
-      balanceRaw: r.balance_raw,
-      balance: r.balance,
-    }));
+  ) {
+    this.nftVerifier = new NftChainVerifier(httpClient);
   }
 
+  /** 方案 3：对 monitored ERC20 multicall balanceOf，以 finalized 块链上状态为准。 */
+  async getTokenBalances(address: string): Promise<TokenBalance[]> {
+    const addr = address.toLowerCase() as `0x${string}`;
+    const tokens = await this.contractRepo.findActive(this.chainId, 'ERC20');
+    if (tokens.length === 0) return [];
+
+    const contracts = tokens.map((t) => ({
+      address: t.address as `0x${string}`,
+      abi: erc20BalanceAbi,
+      functionName: 'balanceOf' as const,
+      args: [addr] as const,
+    }));
+
+    const results = await withRetry(
+      () => this.httpClient.multicall({ contracts, blockTag: 'finalized' }),
+      { label: `erc20 balanceOf multicall ${addr}` },
+    );
+
+    const balances: TokenBalance[] = [];
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i]!;
+      const result = results[i];
+      if (!result || result.status === 'failure') continue;
+
+      const raw = result.result as bigint;
+      if (raw <= 0n) continue;
+
+      const decimals = token.decimals ?? 18;
+      balances.push({
+        contractAddress: token.address,
+        symbol: token.symbol,
+        decimals,
+        balanceRaw: raw.toString(),
+        balance: formatUnits(raw, decimals),
+      });
+    }
+
+    return balances.sort((a, b) => {
+      const diff = BigInt(b.balanceRaw) - BigInt(a.balanceRaw);
+      return diff > 0n ? 1 : diff < 0n ? -1 : 0;
+    });
+  }
+
+  /** 改法 A：DB 候选 + 链上 ownerOf/balanceOf 校验；不写回 DB。 */
   async getNftHoldings(
     address: string,
     opts: { limit?: number; offset?: number } = {},
@@ -71,7 +105,7 @@ export class BalanceService {
        LIMIT $3 OFFSET $4`,
       [this.chainId, addr, limit, offset],
     );
-    return rows.map((r) => ({
+    const candidates: NftHolding[] = rows.map((r) => ({
       contractAddress: r.contract_address,
       tokenId: r.token_id,
       tokenStandard: r.token_standard,
@@ -80,6 +114,8 @@ export class BalanceService {
       imageUrl: r.image_url ?? null,
       metadataUri: r.metadata_uri ?? null,
     }));
+
+    return this.nftVerifier.verifyHoldings(addr, candidates);
   }
 
   async getNativeBalance(address: string): Promise<NativeBalance> {

@@ -1,4 +1,6 @@
 import type { Pool } from 'pg';
+import type { ContractRepo } from '../../indexer/db/contract-repo.js';
+import { INDEXED_DATA_DISCLAIMER } from './indexing-disclaimer.js';
 
 export interface TxRecord {
   chainId: number;
@@ -19,6 +21,8 @@ export interface TxPage {
   data: TxRecord[];
   nextCursor: string | null;
   hasMore: boolean;
+  indexedSinceBlock: string | null;
+  disclaimer: string;
 }
 
 interface Cursor {
@@ -35,7 +39,10 @@ function decodeCursor(s: string): Cursor {
 }
 
 export class TxHistoryService {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly contractRepo: ContractRepo,
+  ) {}
 
   async getHistory(
     chainId: number,
@@ -50,6 +57,10 @@ export class TxHistoryService {
     const limit = Math.min(opts.limit ?? 20, 100);
     const token = opts.token?.toLowerCase() ?? null;
     const cursor = opts.cursor ? decodeCursor(opts.cursor) : null;
+
+    const indexedSinceBlock = token != null
+      ? await this.contractRepo.getStartBlock(chainId, token)
+      : await this.contractRepo.getMinErc20StartBlock(chainId);
 
     const { rows } = await this.pool.query(
       `SELECT chain_id, contract_address, symbol, tx_hash, log_index,
@@ -91,6 +102,8 @@ export class TxHistoryService {
         ? encodeCursor({ blockNumber: last.block_number, logIndex: last.log_index })
         : null,
       hasMore,
+      indexedSinceBlock: indexedSinceBlock?.toString() ?? null,
+      disclaimer: INDEXED_DATA_DISCLAIMER,
     };
   }
 }

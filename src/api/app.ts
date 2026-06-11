@@ -5,9 +5,10 @@ import type { PublicClient } from 'viem';
 import type Redis from 'ioredis';
 import { CacheService } from '../infrastructure/cache/redis-client.js';
 import { logger } from '../infrastructure/logger/logger.js';
-import { BalanceService } from '../wallet/balance-service.js';
-import { TxHistoryService } from '../wallet/tx-history-service.js';
-import { HoldersService } from '../wallet/holders-service.js';
+import { ContractRepo } from '../indexer/db/contract-repo.js';
+import { BalanceService } from '../wallet/service/balance-service.js';
+import { TxHistoryService } from '../wallet/service/tx-history-service.js';
+import { HoldersService } from '../wallet/service/holders-service.js';
 import { authRouter } from './routes/auth.js';
 import { balancesRouter } from './routes/balances.js';
 import { nftsRouter } from './routes/nfts.js';
@@ -39,9 +40,10 @@ export function buildExpressApp(
   });
 
   const cache = new CacheService(redis);
-  const balanceService = new BalanceService(pool, httpClient, cache, env.CHAIN_ID);
-  const txService = new TxHistoryService(pool);
-  const holdersService = new HoldersService(pool, cache, env.CHAIN_ID);
+  const contractRepo = new ContractRepo(pool);
+  const balanceService = new BalanceService(pool, httpClient, cache, contractRepo, env.CHAIN_ID);
+  const txService = new TxHistoryService(pool, contractRepo);
+  const holdersService = new HoldersService(pool, cache, contractRepo, env.CHAIN_ID);
 
   app.use('/v1/auth', authRouter(pool));
   app.use('/v1', balancesRouter(balanceService, redis));

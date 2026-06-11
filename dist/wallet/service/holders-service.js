@@ -1,4 +1,4 @@
-import { CacheKeys } from '../infrastructure/cache/redis-client.js';
+import { CacheKeys } from '../../infrastructure/cache/redis-client.js';
 import { INDEXED_DATA_DISCLAIMER } from './indexing-disclaimer.js';
 export class HoldersService {
     pool;

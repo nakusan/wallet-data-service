@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import type Redis from 'ioredis';
 import { authMiddleware } from '../middleware/auth.js';
-import type { TxHistoryService } from '../../wallet/tx-history-service.js';
+import type { TxHistoryService } from '../../wallet/service/tx-history-service.js';
 
 const querySchema = z.object({
   chainId: z.coerce.number().int().positive().default(1),

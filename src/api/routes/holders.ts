@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import type Redis from 'ioredis';
 import { authMiddleware } from '../middleware/auth.js';
-import type { HoldersService } from '../../wallet/holders-service.js';
+import type { HoldersService } from '../../wallet/service/holders-service.js';
 
 const querySchema = z.object({
   chainId: z.coerce.number().int().positive().default(1),
@@ -21,8 +21,8 @@ export function holdersRouter(holdersService: HoldersService, redis: Redis): Rou
         const contract = contractSchema.parse(req.params.contract);
         const { limit } = querySchema.parse(req.query);
 
-        const holders = await holdersService.getTopHolders(contract, limit);
-        res.json({ data: holders, total: holders.length });
+        const result = await holdersService.getTopHolders(contract, limit);
+        res.json(result);
       } catch (err) {
         next(err);
       }

@@ -1,9 +1,6 @@
-import type { PoolClient } from 'pg';
-import { ZERO_ADDRESS } from '../config/constants.js';
-import type { MaterializationRewinder } from '../indexer/service/reorg-service.js';
-import { logger } from '../infrastructure/logger/logger.js';
+import { ZERO_ADDRESS } from '../../config/constants.js';
+import { logger } from '../../infrastructure/logger/logger.js';
 import { BalanceSyncStateRepo } from './balance-sync-state-repo.js';
-
 /**
  * ERC20 余额物化的 reorg 回滚器。
  *
@@ -17,21 +14,15 @@ import { BalanceSyncStateRepo } from './balance-sync-state-repo.js';
  *     （public ∪ archive）重算余额。
  *  3. 将所有越过 commonAncestor 的合约水位回退到 commonAncestor，由 SyncWorker 重放修正后的区间。
  */
-export class Erc20BalanceRewinder implements MaterializationRewinder {
-  private readonly syncStateRepo = new BalanceSyncStateRepo();
-
-  async rewindForReorg(
-    client: PoolClient,
-    chainId: number,
-    commonAncestor: bigint,
-  ): Promise<void> {
-    const anchor = commonAncestor.toString();
-
-    const needsRewind = await this.syncStateRepo.hasAnyAbove(client, chainId, 'erc20', commonAncestor);
-    if (!needsRewind) return;
-
-    // 受影响 holder：commonAncestor 之后任何转账涉及的 from/to（public ∪ archive）
-    const affectedCte = `
+export class Erc20BalanceRewinder {
+    syncStateRepo = new BalanceSyncStateRepo();
+    async rewindForReorg(client, chainId, commonAncestor) {
+        const anchor = commonAncestor.toString();
+        const needsRewind = await this.syncStateRepo.hasAnyAbove(client, chainId, 'erc20', commonAncestor);
+        if (!needsRewind)
+            return;
+        // 受影响 holder：commonAncestor 之后任何转账涉及的 from/to（public ∪ archive）
+        const affectedCte = `
       affected AS (
         SELECT DISTINCT contract_address, holder FROM (
           SELECT contract_address, from_address AS holder FROM token_transfers
@@ -44,19 +35,13 @@ export class Erc20BalanceRewinder implements MaterializationRewinder {
             WHERE chain_id=$1 AND block_number>$2
         ) a
       )`;
-
-    await client.query(
-      `WITH ${affectedCte}
+        await client.query(`WITH ${affectedCte}
        DELETE FROM token_balances tb
        USING affected a
        WHERE tb.chain_id=$1
          AND tb.contract_address=a.contract_address
-         AND tb.holder_address=a.holder`,
-      [chainId, anchor],
-    );
-
-    await client.query(
-      `WITH ${affectedCte},
+         AND tb.holder_address=a.holder`, [chainId, anchor]);
+        await client.query(`WITH ${affectedCte},
        delta AS (
          SELECT chain_id, contract_address, to_address AS holder, SUM(amount_raw::NUMERIC) AS d
            FROM token_transfers
@@ -101,19 +86,11 @@ export class Erc20BalanceRewinder implements MaterializationRewinder {
          SET balance_raw=EXCLUDED.balance_raw,
              balance=EXCLUDED.balance,
              last_transfer_block=EXCLUDED.last_transfer_block,
-             updated_at=NOW()`,
-      [chainId, anchor, ZERO_ADDRESS],
-    );
-
-    await this.syncStateRepo.rewindAllAbove(client, chainId, 'erc20', commonAncestor);
-
-    logger.warn(
-      { commonAncestor: anchor },
-      'erc20 余额物化已随 reorg 回滚并重算受影响 holder',
-    );
-  }
+             updated_at=NOW()`, [chainId, anchor, ZERO_ADDRESS]);
+        await this.syncStateRepo.rewindAllAbove(client, chainId, 'erc20', commonAncestor);
+        logger.warn({ commonAncestor: anchor }, 'erc20 余额物化已随 reorg 回滚并重算受影响 holder');
+    }
 }
-
 /**
  * NFT 持有快照的 reorg 回滚器。
  *
@@ -122,20 +99,14 @@ export class Erc20BalanceRewinder implements MaterializationRewinder {
  * ERC721 与 ERC1155 统一按净额聚合（nft_transfers.amount 对 ERC721 恒为 1），
  * 排除零地址，保留净额>0 的持有者。
  */
-export class NftHoldingRewinder implements MaterializationRewinder {
-  private readonly syncStateRepo = new BalanceSyncStateRepo();
-
-  async rewindForReorg(
-    client: PoolClient,
-    chainId: number,
-    commonAncestor: bigint,
-  ): Promise<void> {
-    const anchor = commonAncestor.toString();
-
-    const needsRewind = await this.syncStateRepo.hasAnyAbove(client, chainId, 'nft', commonAncestor);
-    if (!needsRewind) return;
-
-    const affectedCte = `
+export class NftHoldingRewinder {
+    syncStateRepo = new BalanceSyncStateRepo();
+    async rewindForReorg(client, chainId, commonAncestor) {
+        const anchor = commonAncestor.toString();
+        const needsRewind = await this.syncStateRepo.hasAnyAbove(client, chainId, 'nft', commonAncestor);
+        if (!needsRewind)
+            return;
+        const affectedCte = `
       affected AS (
         SELECT DISTINCT contract_address, token_id FROM (
           SELECT contract_address, token_id FROM nft_transfers
@@ -144,19 +115,13 @@ export class NftHoldingRewinder implements MaterializationRewinder {
             WHERE chain_id=$1 AND block_number>$2
         ) a
       )`;
-
-    await client.query(
-      `WITH ${affectedCte}
+        await client.query(`WITH ${affectedCte}
        DELETE FROM nft_holdings h
        USING affected a
        WHERE h.chain_id=$1
          AND h.contract_address=a.contract_address
-         AND h.token_id=a.token_id`,
-      [chainId, anchor],
-    );
-
-    await client.query(
-      `WITH ${affectedCte},
+         AND h.token_id=a.token_id`, [chainId, anchor]);
+        await client.query(`WITH ${affectedCte},
        moves AS (
          SELECT contract_address, token_id, token_standard,
                 to_address AS owner, amount::NUMERIC AS d
@@ -197,15 +162,9 @@ export class NftHoldingRewinder implements MaterializationRewinder {
        ON CONFLICT (chain_id, contract_address, token_id, owner_address) DO UPDATE
          SET amount=EXCLUDED.amount,
              last_transfer_block=EXCLUDED.last_transfer_block,
-             updated_at=NOW()`,
-      [chainId, anchor, ZERO_ADDRESS],
-    );
-
-    await this.syncStateRepo.rewindAllAbove(client, chainId, 'nft', commonAncestor);
-
-    logger.warn(
-      { commonAncestor: anchor },
-      'nft 持有快照已随 reorg 回滚并重算受影响 token',
-    );
-  }
+             updated_at=NOW()`, [chainId, anchor, ZERO_ADDRESS]);
+        await this.syncStateRepo.rewindAllAbove(client, chainId, 'nft', commonAncestor);
+        logger.warn({ commonAncestor: anchor }, 'nft 持有快照已随 reorg 回滚并重算受影响 token');
+    }
 }
+//# sourceMappingURL=materialization-rewinder.js.map

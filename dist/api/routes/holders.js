@@ -12,8 +12,8 @@ export function holdersRouter(holdersService, redis) {
         try {
             const contract = contractSchema.parse(req.params.contract);
             const { limit } = querySchema.parse(req.query);
-            const holders = await holdersService.getTopHolders(contract, limit);
-            res.json({ data: holders, total: holders.length });
+            const result = await holdersService.getTopHolders(contract, limit);
+            res.json(result);
         }
         catch (err) {
             next(err);

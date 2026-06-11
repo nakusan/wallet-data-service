@@ -33,4 +33,25 @@ export class ContractRepo {
     );
     return rows.map(rowToContract);
   }
+
+  async getStartBlock(chainId: number, contractAddress: string): Promise<bigint | null> {
+    const { rows } = await this.pool.query(
+      `SELECT start_block FROM monitored_contracts
+       WHERE chain_id=$1 AND lower(address)=lower($2) AND is_active=true`,
+      [chainId, contractAddress],
+    );
+    const val = rows[0]?.start_block;
+    return val != null ? BigInt(val as string) : null;
+  }
+
+  /** 活跃 ERC20 监控合约中最小的 start_block（用于未指定 token 的交易历史说明）。 */
+  async getMinErc20StartBlock(chainId: number): Promise<bigint | null> {
+    const { rows } = await this.pool.query(
+      `SELECT MIN(start_block) AS min_block FROM monitored_contracts
+       WHERE chain_id=$1 AND is_active=true AND token_type='ERC20' AND start_block IS NOT NULL`,
+      [chainId],
+    );
+    const val = rows[0]?.min_block;
+    return val != null ? BigInt(val as string) : null;
+  }
 }

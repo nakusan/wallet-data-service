@@ -1,8 +1,8 @@
 import type { Pool, PoolClient } from 'pg';
 import type Redis from 'ioredis';
-import { ZERO_ADDRESS, MATERIALIZATION_LOCK_CLASS } from '../config/constants.js';
-import { CacheKeys } from '../infrastructure/cache/redis-client.js';
-import { logger } from '../infrastructure/logger/logger.js';
+import { ZERO_ADDRESS, MATERIALIZATION_LOCK_CLASS } from '../../config/constants.js';
+import { CacheKeys } from '../../infrastructure/cache/redis-client.js';
+import { logger } from '../../infrastructure/logger/logger.js';
 import { BalanceSyncStateRepo } from './balance-sync-state-repo.js';
 
 const BATCH_BLOCKS = 2000n;
@@ -165,14 +165,20 @@ export class NftHoldingSyncWorker {
         );
       }
     } else {
-      // ERC1155: 减 from
+      // ERC1155: 减 from（UPSERT，避免行不存在时静默丢失扣减）
       if (from_address !== ZERO_ADDRESS) {
         await client.query(
-          `UPDATE nft_holdings
-           SET amount=amount-$1, last_transfer_block=$2, updated_at=NOW()
-           WHERE chain_id=$3 AND contract_address=$4
-             AND token_id=$5 AND owner_address=$6`,
-          [amountBn.toString(), blockNumber.toString(), this.chainId, contract_address, token_id, from_address],
+          `INSERT INTO nft_holdings
+             (chain_id, contract_address, token_id, token_standard,
+              owner_address, amount, last_transfer_block)
+           VALUES ($1,$2,$3,'ERC1155',$4,-$5,$6)
+           ON CONFLICT (chain_id, contract_address, token_id, owner_address)
+           DO UPDATE SET amount=nft_holdings.amount-$5,
+                         last_transfer_block=$6, updated_at=NOW()`,
+          [
+            this.chainId, contract_address, token_id, from_address,
+            amountBn.toString(), blockNumber.toString(),
+          ],
         );
       }
       // 加 to

@@ -1,6 +1,6 @@
-import { ZERO_ADDRESS, MATERIALIZATION_LOCK_CLASS } from '../config/constants.js';
-import { CacheKeys } from '../infrastructure/cache/redis-client.js';
-import { logger } from '../infrastructure/logger/logger.js';
+import { ZERO_ADDRESS, MATERIALIZATION_LOCK_CLASS } from '../../config/constants.js';
+import { CacheKeys } from '../../infrastructure/cache/redis-client.js';
+import { logger } from '../../infrastructure/logger/logger.js';
 import { BalanceSyncStateRepo } from './balance-sync-state-repo.js';
 const BATCH_BLOCKS = 2000n;
 const MAX_CONTRACTS_PER_TICK = 10;

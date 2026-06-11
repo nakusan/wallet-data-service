@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import type Redis from 'ioredis';
 import { authMiddleware } from '../middleware/auth.js';
-import type { BalanceService } from '../../wallet/balance-service.js';
+import type { BalanceService } from '../../wallet/service/balance-service.js';
 import { CacheService, CacheKeys } from '../../infrastructure/cache/redis-client.js';
 
 const querySchema = z.object({

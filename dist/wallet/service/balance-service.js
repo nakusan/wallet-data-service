@@ -1,8 +1,8 @@
 import { formatEther, formatUnits } from 'viem';
-import { CacheKeys } from '../infrastructure/cache/redis-client.js';
-import { withRetry } from '../indexer/util/retry.js';
-import { erc20BalanceAbi } from './chain-read-abis.js';
-import { NftChainVerifier } from './nft-chain-verifier.js';
+import { CacheKeys } from '../../infrastructure/cache/redis-client.js';
+import { withRetry } from '../../indexer/util/retry.js';
+import { erc20BalanceAbi } from '../chain/chain-read-abis.js';
+import { NftChainVerifier } from '../chain/nft-chain-verifier.js';
 export class BalanceService {
     pool;
     httpClient;

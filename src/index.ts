@@ -4,8 +4,8 @@ import { createPool } from './infrastructure/db/pool.js';
 import { getRedis } from './infrastructure/cache/redis-client.js';
 import { createChainClients } from './indexer/chain/viem-client.js';
 import { IndexerApp } from './indexer/indexer-app.js';
-import { BalanceSyncWorker } from './wallet/balance-sync-worker.js';
-import { NftHoldingSyncWorker } from './wallet/nft-holding-sync-worker.js';
+import { BalanceSyncWorker } from './wallet/sync/balance-sync-worker.js';
+import { NftHoldingSyncWorker } from './wallet/sync/nft-holding-sync-worker.js';
 import { buildExpressApp } from './api/app.js';
 import { logger } from './infrastructure/logger/logger.js';
 

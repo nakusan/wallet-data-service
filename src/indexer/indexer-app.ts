@@ -2,7 +2,7 @@ import type { Pool } from 'pg';
 import type { Env } from '../config/env.js';
 import type { ChainClients } from './chain/viem-client.js';
 import { getSafeBlockNumber, getFinalizedBlockNumber } from './chain/viem-client.js';
-import { Erc20BalanceRewinder, NftHoldingRewinder } from '../wallet/materialization-rewinder.js';
+import { Erc20BalanceRewinder, NftHoldingRewinder } from '../wallet/sync/materialization-rewinder.js';
 import { ContractRepo } from './db/contract-repo.js';
 import { CheckpointRepo } from './db/checkpoint-repo.js';
 import { ChainStateRepo } from './db/chain-state-repo.js';

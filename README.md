@@ -11,8 +11,9 @@
 | ERC20 索引 | 继承 chain-indexer 全部能力，含分区热/温存储、reorg 检测与修复 |
 | NFT 索引 | ERC721 Transfer + ERC1155 TransferSingle/TransferBatch，TransferBatch 自动展开 |
 | 原生币索引 | 逐块扫描 `eth_getBlockByNumber`，过滤成功交易中 `value > 0` 的转账 |
-| 余额物化 | `BalanceSyncWorker` 增量维护 ERC20 余额快照，水位线持久化支持断点续跑 |
-| NFT 持有快照 | `NftHoldingSyncWorker` 实时维护 NFT 所有权，ERC1155 delta 增减 |
+| 余额物化 | `BalanceSyncWorker` 增量维护 ERC20 快照，供 Top Holders 等索引窗口内分析 |
+| 用户余额查询 | ERC20/NFT/原生币 **以链为准**（RPC multicall + NFT 链上校验）；物化表不参与余额 API |
+| NFT 持有快照 | `NftHoldingSyncWorker` 维护候选列表与 metadata；展示层 RPC 校验 owner/amount |
 | REST API | Express 5，含 JWT 鉴权、Scope 控制、滑动窗口限流 |
 | Redis 缓存 | 热门地址资产查询缓存，原生币余额 RPC 结果缓存，JWT 黑名单 |
 
@@ -112,11 +113,10 @@ wallet-data-service/
 │   │   ├── nft/                 # NFT 索引器（ERC721 + ERC1155）
 │   │   └── indexer-app.ts       # 统一启动类（协调 ERC20 / NFT 两条流水线）
 │   ├── wallet/
-│   │   ├── balance-sync-worker.ts      # ERC20 余额增量同步
-│   │   ├── nft-holding-sync-worker.ts  # NFT 持有增量同步
-│   │   ├── balance-service.ts          # 余额查询（ERC20 + native + NFT）
-│   │   ├── tx-history-service.ts       # 交易历史 keyset 分页
-│   │   └── holders-service.ts          # Top N 持有者
+│   │   ├── sync/                       # 物化 Worker + 水位线 + Reorg 回滚
+│   │   ├── service/                    # API 读路径（余额、历史、Top Holders）
+│   │   ├── chain/                      # RPC 读链（multicall、NFT 校验）
+│   │   └── README.md                   # 子目录说明
 │   ├── api/
 │   │   ├── middleware/          # auth.ts、error-handler.ts
 │   │   ├── routes/              # auth、balances、nfts、transactions、holders
@@ -285,7 +285,11 @@ GET /v1/address/:addr/balances?chainId=1
 }
 ```
 
-> **缓存**：Redis TTL 30s（ERC20 余额）/ 15s（原生币）/ 60s（NFT）
+> **数据来源（方案 3）**：
+> - `native` / `tokens`：RPC `@ finalized`（ERC20 对 `monitored_contracts` 列表 multicall `balanceOf`）
+> - `nfts`：`nft_holdings` 作候选 tokenId，链上 `ownerOf` / `balanceOf` 校验后返回（不写回 DB）
+>
+> **缓存**：Redis TTL 30s（整包 balances）/ 15s（原生币单独路径）/ 60s（NFT 列表接口）
 
 ---
 
@@ -331,9 +335,13 @@ GET /v1/address/:addr/transactions?chainId=1&token=0x...&limit=20&cursor=xxx
     }
   ],
   "nextCursor": "eyJibG9ja051bWJlciI6...",
-  "hasMore": true
+  "hasMore": true,
+  "indexedSinceBlock": "12000000",
+  "disclaimer": "Balances and transfers reflect indexed activity since indexedSinceBlock only; may not include full on-chain history before that block."
 }
 ```
+
+> **索引窗口**：`indexedSinceBlock` 来自 `monitored_contracts.start_block`（指定 `token` 时用该合约；未指定时用活跃 ERC20 最小值）。仅包含该块之后的 indexed transfer。
 
 > **分页机制**：Keyset Pagination（`block_number, log_index` 组合游标），无 OFFSET，性能恒定，适合大数据量分页。
 
@@ -362,9 +370,13 @@ GET /v1/tokens/:contract/holders?chainId=1&limit=20
       "rank": 1
     }
   ],
-  "total": 20
+  "total": 20,
+  "indexedSinceBlock": "12000000",
+  "disclaimer": "Balances and transfers reflect indexed activity since indexedSinceBlock only; may not include full on-chain history before that block."
 }
 ```
+
+> **索引窗口**：排名基于 `token_balances` 物化快照，自 `indexedSinceBlock`（`monitored_contracts.start_block`）起累积；**非**链上全量 Top Holders。
 
 > **缓存**：Redis TTL 60s
 
@@ -412,17 +424,23 @@ GET /v1/health
 
 ### 余额物化（非实时）
 
-`token_balances` 表由后台 `BalanceSyncWorker` 每 30 秒增量更新，查询接口存在约 30s 的数据滞后。
+### ERC20 余额：双轨数据源
 
-增量算法核心：以水位线 `[lastSyncedBlock+1, finalized]` 为窗口，对窗口内的转账做双向聚合（`to_address +delta`, `from_address -delta`），通过 `ON CONFLICT DO UPDATE` 原子更新余额。
+| 用途 | 数据源 | 说明 |
+|------|--------|------|
+| **用户余额 API** | RPC `balanceOf` multicall | 与链上 finalized 状态一致 |
+| **Top Holders** | `token_balances` 物化表 | 自 `start_block` 起索引窗口内累积，可能不完整 |
 
-如需精确实时余额，可在查询时额外叠加 `block_number > last_transfer_block` 的未同步增量（按需权衡性能开销）。
+`BalanceSyncWorker` 每 30 秒增量更新 `token_balances`，供 Top Holders 与分析使用；**余额查询 API 不读该表**。
+
+增量算法：以合约级水位线 `[lastSyncedBlock+1, finalized]` 为窗口，对窗口内转账做双向聚合（`to +delta`, `from -delta`），`ON CONFLICT DO UPDATE` 原子更新。
 
 ### NFT 持有同步
 
 - **ERC721**：转移时删除旧 owner 行，插入新 owner 行（owner_address 更新语义）
-- **ERC1155**：delta 增减，自动清理 `amount ≤ 0` 的行
+- **ERC1155**：from/to 均 UPSERT delta 增减，自动清理 `amount ≤ 0` 的行
 - Mint（`from = 0x000...000`）和 Burn（`to = 0x000...000`）作为特殊 from/to 处理
+- **用户 NFT API**：`nft_holdings` 提供候选与 metadata；`ownerOf` / `balanceOf` 链上校验后以 RPC 为准（不写回 DB）
 
 ### 原生币余额
 

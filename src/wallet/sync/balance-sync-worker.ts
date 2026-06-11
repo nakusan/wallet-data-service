@@ -1,8 +1,8 @@
 import type { Pool } from 'pg';
 import type Redis from 'ioredis';
-import { MATERIALIZATION_LOCK_CLASS, ZERO_ADDRESS } from '../config/constants.js';
-import { CacheKeys } from '../infrastructure/cache/redis-client.js';
-import { logger } from '../infrastructure/logger/logger.js';
+import { MATERIALIZATION_LOCK_CLASS, ZERO_ADDRESS } from '../../config/constants.js';
+import { CacheKeys } from '../../infrastructure/cache/redis-client.js';
+import { logger } from '../../infrastructure/logger/logger.js';
 import { BalanceSyncStateRepo } from './balance-sync-state-repo.js';
 
 const BATCH_BLOCKS = 5000n;

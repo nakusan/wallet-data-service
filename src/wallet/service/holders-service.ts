@@ -1,6 +1,8 @@
 import type { Pool } from 'pg';
-import type { CacheService } from '../infrastructure/cache/redis-client.js';
-import { CacheKeys } from '../infrastructure/cache/redis-client.js';
+import type { CacheService } from '../../infrastructure/cache/redis-client.js';
+import { CacheKeys } from '../../infrastructure/cache/redis-client.js';
+import type { ContractRepo } from '../../indexer/db/contract-repo.js';
+import { INDEXED_DATA_DISCLAIMER } from './indexing-disclaimer.js';
 
 export interface HolderEntry {
   holderAddress: string;
@@ -9,19 +11,30 @@ export interface HolderEntry {
   rank: number;
 }
 
+export interface TopHoldersResult {
+  data: HolderEntry[];
+  total: number;
+  indexedSinceBlock: string | null;
+  disclaimer: string;
+}
+
 export class HoldersService {
   constructor(
     private readonly pool: Pool,
     private readonly cache: CacheService,
+    private readonly contractRepo: ContractRepo,
     private readonly chainId: number,
   ) {}
 
-  async getTopHolders(contractAddress: string, limit: number): Promise<HolderEntry[]> {
+  async getTopHolders(contractAddress: string, limit: number): Promise<TopHoldersResult> {
     const contract = contractAddress.toLowerCase();
     const n = Math.min(limit, 100);
     const key = CacheKeys.topHolders(this.chainId, contract, n);
 
-    return this.cache.getOrSet(key, 60, async () => {
+    const indexedSinceBlock = await this.contractRepo.getStartBlock(this.chainId, contract);
+    const indexedSinceStr = indexedSinceBlock?.toString() ?? null;
+
+    const data = await this.cache.getOrSet(key, 60, async () => {
       const { rows } = await this.pool.query(
         `SELECT holder_address, balance_raw, balance,
                 ROW_NUMBER() OVER (ORDER BY balance_raw DESC) AS rank
@@ -38,5 +51,12 @@ export class HoldersService {
         rank: Number(r.rank),
       }));
     });
+
+    return {
+      data,
+      total: data.length,
+      indexedSinceBlock: indexedSinceStr,
+      disclaimer: INDEXED_DATA_DISCLAIMER,
+    };
   }
 }
