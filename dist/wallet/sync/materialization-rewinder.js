@@ -72,11 +72,10 @@ export class Erc20BalanceRewinder {
        )
        INSERT INTO token_balances
          (chain_id, contract_address, holder_address,
-          symbol, decimals, balance_raw, balance, last_transfer_block)
+          symbol, decimals, balance_raw, last_transfer_block)
        SELECT n.chain_id, n.contract_address, n.holder,
               mc.symbol, mc.decimals,
               n.net_delta,
-              n.net_delta / POWER(10, mc.decimals),
               $2
        FROM net n
        JOIN monitored_contracts mc
@@ -84,7 +83,6 @@ export class Erc20BalanceRewinder {
        WHERE n.net_delta <> 0
        ON CONFLICT (chain_id, contract_address, holder_address) DO UPDATE
          SET balance_raw=EXCLUDED.balance_raw,
-             balance=EXCLUDED.balance,
              last_transfer_block=EXCLUDED.last_transfer_block,
              updated_at=NOW()`, [chainId, anchor, ZERO_ADDRESS]);
         await this.syncStateRepo.rewindAllAbove(client, chainId, 'erc20', commonAncestor);

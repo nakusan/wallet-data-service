@@ -104,18 +104,16 @@ export class BalanceSyncWorker {
            )
            INSERT INTO token_balances
              (chain_id, contract_address, holder_address,
-              symbol, decimals, balance_raw, balance, last_transfer_block)
+              symbol, decimals, balance_raw, last_transfer_block)
            SELECT n.chain_id, n.contract_address, n.holder,
                   mc.symbol, mc.decimals,
                   n.net_delta,
-                  n.net_delta / POWER(10, mc.decimals),
                   $4
            FROM net n
            JOIN monitored_contracts mc
              ON mc.chain_id=n.chain_id AND mc.address=n.contract_address
            ON CONFLICT (chain_id, contract_address, holder_address) DO UPDATE
              SET balance_raw = token_balances.balance_raw + EXCLUDED.balance_raw,
-                 balance = token_balances.balance + EXCLUDED.balance,
                  last_transfer_block = EXCLUDED.last_transfer_block,
                  updated_at = NOW()`, [
                     this.chainId,

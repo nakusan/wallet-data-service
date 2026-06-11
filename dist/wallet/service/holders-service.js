@@ -1,3 +1,4 @@
+import { formatUnits } from 'viem';
 import { CacheKeys } from '../../infrastructure/cache/redis-client.js';
 import { INDEXED_DATA_DISCLAIMER } from './indexing-disclaimer.js';
 export class HoldersService {
@@ -18,7 +19,7 @@ export class HoldersService {
         const indexedSinceBlock = await this.contractRepo.getStartBlock(this.chainId, contract);
         const indexedSinceStr = indexedSinceBlock?.toString() ?? null;
         const data = await this.cache.getOrSet(key, 60, async () => {
-            const { rows } = await this.pool.query(`SELECT holder_address, balance_raw, balance,
+            const { rows } = await this.pool.query(`SELECT holder_address, balance_raw, decimals,
                 ROW_NUMBER() OVER (ORDER BY balance_raw DESC) AS rank
          FROM token_balances
          WHERE chain_id=$1 AND contract_address=$2 AND balance_raw>0
@@ -27,7 +28,7 @@ export class HoldersService {
             return rows.map((r) => ({
                 holderAddress: r.holder_address,
                 balanceRaw: r.balance_raw,
-                balance: r.balance,
+                balance: formatUnits(BigInt(r.balance_raw), Number(r.decimals)),
                 rank: Number(r.rank),
             }));
         });
