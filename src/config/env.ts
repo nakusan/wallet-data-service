@@ -8,6 +8,8 @@ const envSchema = z.object({
   RPC_WS_URL: z.string().url(),
   REDIS_URL: z.string().min(1),
   PORT: z.coerce.number().int().positive().default(3000),
+  CORS_ORIGINS: z.string().optional(),
+  JSON_BODY_LIMIT: z.string().default('16kb'),
   JWT_SECRET: z.string().min(32),
   JWT_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
   CONFIRMATION_DEPTH: z.coerce.number().int().nonnegative().default(12),

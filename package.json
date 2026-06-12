@@ -11,12 +11,21 @@
     "migrate": "tsx scripts/migrate.ts",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["web3", "wallet", "indexer", "ethereum", "erc20", "nft"],
+  "keywords": [
+    "web3",
+    "wallet",
+    "indexer",
+    "ethereum",
+    "erc20",
+    "nft"
+  ],
   "license": "ISC",
   "packageManager": "pnpm@10.30.3",
   "dependencies": {
+    "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.1.0",
+    "helmet": "^8.2.0",
     "ioredis": "^5.6.1",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.21.0",
@@ -27,6 +36,7 @@
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "@types/jsonwebtoken": "^9.0.9",
     "@types/node": "^22.15.21",

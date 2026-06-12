@@ -1,4 +1,6 @@
 import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
 import { pinoHttp } from 'pino-http';
 import type { Pool } from 'pg';
 import type { PublicClient } from 'viem';
@@ -17,6 +19,11 @@ import { holdersRouter } from './routes/holders.js';
 import { errorHandler } from './middleware/error-handler.js';
 import type { Env } from '../config/env.js';
 
+function parseCorsOrigins(raw: string | undefined): string[] {
+  if (!raw?.trim()) return [];
+  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
 export function buildExpressApp(
   pool: Pool,
   redis: Redis,
@@ -24,9 +31,28 @@ export function buildExpressApp(
   env: Env,
 ): express.Application {
   const app = express();
+  const allowedOrigins = parseCorsOrigins(env.CORS_ORIGINS);
 
+  app.use(helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  }));
+  app.use(cors({
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      callback(null, false);
+    },
+    methods: ['GET', 'POST'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    maxAge: 86_400,
+  }));
   app.use(pinoHttp({ logger }));
-  app.use(express.json());
+  app.use(express.json({
+    limit: env.JSON_BODY_LIMIT,
+    strict: true,
+    type: 'application/json',
+  }));
 
   // 健康检查（无需鉴权）
   app.get('/v1/health', async (_req, res) => {
@@ -35,7 +61,11 @@ export function buildExpressApp(
       await redis.ping();
       res.json({ status: 'ok', ts: new Date().toISOString() });
     } catch (err) {
-      res.status(503).json({ status: 'error', message: String(err) });
+      logger.warn({ err }, 'health check failed');
+      res.status(503).json({
+        status: 'error',
+        ...(env.NODE_ENV !== 'production' && { message: 'dependency unavailable' }),
+      });
     }
   });
 
