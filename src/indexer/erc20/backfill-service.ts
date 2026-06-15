@@ -8,7 +8,7 @@ import { logger } from '../../infrastructure/logger/logger.js';
 import { Erc20LogParser } from './log-parser.js';
 import type { ContractWriteCoordinator } from '../util/contract-write-coordinator.js';
 import type { FinalizedPersistService } from '../service/finalized-persist-service.js';
-import type { ReorgService } from '../service/reorg-service.js';
+import type { ReorgHandler } from '../service/chain-reorg-coordinator.js';
 
 export class Erc20BackfillService {
   private readonly logFetcher: Erc20LogFetcher;
@@ -19,7 +19,7 @@ export class Erc20BackfillService {
     httpClient: PublicClient,
     private readonly writeCoordinator: ContractWriteCoordinator,
     private readonly persistService: FinalizedPersistService<TransferRecord>,
-    private readonly reorgService: ReorgService,
+    private readonly reorgHandler: ReorgHandler,
   ) {
     this.logFetcher = new Erc20LogFetcher(httpClient);
   }
@@ -66,7 +66,7 @@ export class Erc20BackfillService {
     } catch (error) {
       if (error instanceof ReorgDetectedError) {
         logger.warn({ symbol: contract.symbol, forkBlock: error.forkBlock.toString() }, '回填检测到 reorg');
-        await this.reorgService.onReorgDetected(error);
+        this.reorgHandler.onReorgDetected(error);
         return;
       }
       throw error;

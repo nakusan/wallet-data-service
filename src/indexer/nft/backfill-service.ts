@@ -8,7 +8,7 @@ import { getBlockTimestamp } from '../chain/viem-client.js';
 import { logger } from '../../infrastructure/logger/logger.js';
 import type { ContractWriteCoordinator } from '../util/contract-write-coordinator.js';
 import type { FinalizedPersistService } from '../service/finalized-persist-service.js';
-import type { ReorgService } from '../service/reorg-service.js';
+import type { ReorgHandler } from '../service/chain-reorg-coordinator.js';
 import type { NftTransferRepo } from './transfer-repo.js';
 
 export class NftBackfillService {
@@ -20,7 +20,7 @@ export class NftBackfillService {
     httpClient: PublicClient,
     private readonly writeCoordinator: ContractWriteCoordinator,
     private readonly persistService: FinalizedPersistService<NftTransferRecord>,
-    private readonly reorgService: ReorgService,
+    private readonly reorgHandler: ReorgHandler,
     private readonly nftRepo: NftTransferRepo,
   ) {
     this.logFetcher = new NftLogFetcher(httpClient);
@@ -70,7 +70,7 @@ export class NftBackfillService {
       logger.info({ symbol: contract.symbol, logs: logs.length, inserted }, 'NFT 回填批次完成');
     } catch (error) {
       if (error instanceof ReorgDetectedError) {
-        await this.reorgService.onReorgDetected(error);
+        this.reorgHandler.onReorgDetected(error);
         return;
       }
       throw error;

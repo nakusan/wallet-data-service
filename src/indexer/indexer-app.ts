@@ -10,7 +10,10 @@ import { BlockAnchorRepo } from './db/block-anchor-repo.js';
 import { PartitionRepo } from './db/partition-repo.js';
 import { PartitionService } from './service/partition-service.js';
 import { ContractWriteCoordinator } from './util/contract-write-coordinator.js';
-import { ReorgService } from './service/reorg-service.js';
+import {
+  ChainReorgCoordinator,
+  createChainReorgCoordinator,
+} from './service/chain-reorg-coordinator.js';
 import { FinalizedPersistService } from './service/finalized-persist-service.js';
 import { Erc20TransferRepo } from './erc20/transfer-repo.js';
 import { Erc20BackfillService } from './erc20/backfill-service.js';
@@ -27,21 +30,18 @@ export class IndexerApp {
   private nftLiveWatcher: NftLiveWatcher | null = null;
   private partitionTimer: ReturnType<typeof setInterval> | null = null;
   private reorgTimer: ReturnType<typeof setInterval> | null = null;
+  private chainReorgCoordinator: ChainReorgCoordinator | null = null;
 
   private readonly contractRepo: ContractRepo;
   private readonly checkpointRepo: CheckpointRepo;
   private readonly chainStateRepo: ChainStateRepo;
   private readonly blockAnchorRepo: BlockAnchorRepo;
 
-  // ERC20
   private readonly erc20TransferRepo: Erc20TransferRepo;
   private readonly erc20PartitionService: PartitionService;
-  private erc20ReorgService: ReorgService | null = null;
 
-  // NFT
   private readonly nftTransferRepo: NftTransferRepo;
   private readonly nftPartitionService: PartitionService;
-  private nftReorgService: ReorgService | null = null;
 
   constructor(
     private readonly pool: Pool,
@@ -80,40 +80,60 @@ export class IndexerApp {
       this.nftPartitionService.ensureThroughWithBuffer(safeLatest),
     ]);
 
-    await this.runErc20(safeLatest);
-    await this.runNft(safeLatest);
+    const coordinator = createChainReorgCoordinator(
+      this.pool, this.env, this.chain.http,
+      this.chainStateRepo, this.blockAnchorRepo,
+      this.checkpointRepo, this.writeSemaphore,
+    );
+    this.chainReorgCoordinator = coordinator;
+
+    await this.setupErc20(coordinator);
+    await this.setupNft(coordinator);
+    await coordinator.scanAndRepair();
+
+    await this.startErc20(safeLatest, coordinator);
+    await this.startNft(safeLatest, coordinator);
 
     this.partitionTimer = setInterval(
-      () => void this.runPartitionEnsureTick(), 
-      this.env.PARTITION_ENSURE_INTERVAL_MS
+      () => void this.runPartitionEnsureTick(),
+      this.env.PARTITION_ENSURE_INTERVAL_MS,
     );
     this.reorgTimer = setInterval(
       () => void this.runReorgScanTick(),
-      this.env.REORG_SCAN_INTERVAL_MS
+      this.env.REORG_SCAN_INTERVAL_MS,
     );
 
     logger.info({ safeLatest: safeLatest.toString() }, '索引器（ERC20+NFT）已启动');
   }
 
   async shutdown(): Promise<void> {
-    if (this.reorgTimer) { 
-      clearInterval(this.reorgTimer); 
-      this.reorgTimer = null; 
+    if (this.reorgTimer) {
+      clearInterval(this.reorgTimer);
+      this.reorgTimer = null;
     }
-    if (this.partitionTimer) { 
-      clearInterval(this.partitionTimer); 
-      this.partitionTimer = null; 
+    if (this.partitionTimer) {
+      clearInterval(this.partitionTimer);
+      this.partitionTimer = null;
     }
     await this.erc20LiveWatcher?.shutdown();
     await this.nftLiveWatcher?.shutdown();
     logger.info('索引器已关闭');
   }
 
-  private async runErc20(safeLatest: bigint): Promise<void> {
+  private erc20WriteCoordinator: ContractWriteCoordinator | null = null;
+  private erc20Backfill: Erc20BackfillService | null = null;
+  private erc20Contracts: Awaited<ReturnType<ContractRepo['findActive']>> = [];
+
+  private async setupErc20(coordinator: ChainReorgCoordinator): Promise<void> {
     const contracts = await this.contractRepo.findActive(this.env.CHAIN_ID, 'ERC20');
-    if (contracts.length === 0) { logger.warn('无活跃 ERC20 合约'); return; }
+    if (contracts.length === 0) {
+      logger.warn('无活跃 ERC20 合约');
+      return;
+    }
+    this.erc20Contracts = contracts;
 
     const writeCoordinator = new ContractWriteCoordinator();
+    this.erc20WriteCoordinator = writeCoordinator;
 
     const persistService = new FinalizedPersistService<TransferRecord>(
       this.pool, this.env, this.chain.http,
@@ -123,30 +143,40 @@ export class IndexerApp {
       this.writeSemaphore,
     );
 
-    let liveWatcher: Erc20LiveWatcher | null = null;
-
-    const reorgService = new ReorgService(
-      this.pool, this.env, this.chain.http,
-      this.contractRepo, this.checkpointRepo, this.chainStateRepo, this.blockAnchorRepo,
-      [this.erc20TransferRepo],
-      persistService, writeCoordinator,
-      {
-        pauseIndexing: () => liveWatcher?.pause(),
-        resumeIndexing: () => liveWatcher?.resume(),
-        drainWrites: () => writeCoordinator.drain(),
-      },
-      'erc20',
-      this.writeSemaphore,
-      [new Erc20BalanceRewinder()],
-    );
-    this.erc20ReorgService = reorgService;
-
     const backfill = new Erc20BackfillService(
-      this.env, this.chain.http, writeCoordinator, persistService, reorgService,
+      this.env, 
+      this.chain.http, 
+      writeCoordinator, 
+      persistService, 
+      coordinator,
     );
-    reorgService.setBackfill(backfill);
+    this.erc20Backfill = backfill;
 
-    await reorgService.scanAndRepair();
+    coordinator.register({
+      indexerType: 'erc20',
+      writeCoordinator,
+      liveWatcher: null,
+      repos: [this.erc20TransferRepo],
+      rewinders: [new Erc20BalanceRewinder()],
+      backfill,
+      getContracts: () => this.contractRepo.findActive(this.env.CHAIN_ID, 'ERC20'),
+    }, persistService);
+  }
+
+  private async startErc20(safeLatest: bigint, coordinator: ChainReorgCoordinator): Promise<void> {
+    if (this.erc20Contracts.length === 0 || !this.erc20WriteCoordinator || !this.erc20Backfill) return;
+
+    const writeCoordinator = this.erc20WriteCoordinator;
+    const backfill = this.erc20Backfill;
+    const contracts = this.erc20Contracts;
+
+    const persistService = new FinalizedPersistService<TransferRecord>(
+      this.pool, this.env, this.chain.http,
+      this.erc20TransferRepo, this.checkpointRepo,
+      this.blockAnchorRepo, this.chainStateRepo,
+      this.erc20PartitionService, 'erc20',
+      this.writeSemaphore,
+    );
 
     for (const contract of contracts) {
       const stored = await this.checkpointRepo.get(contract.chainId, contract.address, 'erc20');
@@ -158,8 +188,8 @@ export class IndexerApp {
     const resumeFrom = safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) > 0n
       ? safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) : 0n;
 
-    liveWatcher = new Erc20LiveWatcher(
-      this.env, this.chain.ws, writeCoordinator, persistService, reorgService,
+    const liveWatcher = new Erc20LiveWatcher(
+      this.env, this.chain.ws, writeCoordinator, persistService, coordinator,
       async () => {
         for (const contract of contracts) {
           const last = await this.checkpointRepo.get(contract.chainId, contract.address, 'erc20');
@@ -170,16 +200,27 @@ export class IndexerApp {
       },
     );
     this.erc20LiveWatcher = liveWatcher;
+    coordinator.attachLiveWatcher('erc20', liveWatcher);
     liveWatcher.start(contracts, resumeFrom);
   }
 
-  private async runNft(safeLatest: bigint): Promise<void> {
+  private nftWriteCoordinator: ContractWriteCoordinator | null = null;
+  private nftBackfill: NftBackfillService | null = null;
+  private nftContracts: Awaited<ReturnType<ContractRepo['findActive']>> = [];
+
+  private async setupNft(coordinator: ChainReorgCoordinator): Promise<void> {
     const contracts721 = await this.contractRepo.findActive(this.env.CHAIN_ID, 'ERC721');
     const contracts1155 = await this.contractRepo.findActive(this.env.CHAIN_ID, 'ERC1155');
     const contracts = [...contracts721, ...contracts1155];
-    if (contracts.length === 0) { logger.info('无活跃 NFT 合约，跳过 NFT 索引'); return; }
+    if (contracts.length === 0) {
+      logger.info('无活跃 NFT 合约，跳过 NFT 索引');
+      return;
+    }
+    this.nftContracts = contracts;
 
     const writeCoordinator = new ContractWriteCoordinator();
+    this.nftWriteCoordinator = writeCoordinator;
+
     const persistService = new FinalizedPersistService<NftTransferRecord>(
       this.pool, this.env, this.chain.http,
       this.nftTransferRepo, this.checkpointRepo,
@@ -188,28 +229,40 @@ export class IndexerApp {
       this.writeSemaphore,
     );
 
-    let liveWatcher: NftLiveWatcher | null = null;
-    const reorgService = new ReorgService(
-      this.pool, this.env, this.chain.http,
-      this.contractRepo, this.checkpointRepo, this.chainStateRepo, this.blockAnchorRepo,
-      [this.nftTransferRepo],
-      persistService, writeCoordinator,
-      {
-        pauseIndexing: () => liveWatcher?.pause(),
-        resumeIndexing: () => liveWatcher?.resume(),
-        drainWrites: () => writeCoordinator.drain(),
-      },
-      'nft',
-      this.writeSemaphore,
-      [new NftHoldingRewinder()],
-    );
-    this.nftReorgService = reorgService;
-
     const backfill = new NftBackfillService(
-      this.env, this.chain.http, writeCoordinator, persistService, reorgService, this.nftTransferRepo,
+      this.env, this.chain.http, writeCoordinator, persistService, coordinator, this.nftTransferRepo,
     );
-    reorgService.setBackfill(backfill);
-    await reorgService.scanAndRepair();
+    this.nftBackfill = backfill;
+
+    coordinator.register({
+      indexerType: 'nft',
+      writeCoordinator,
+      liveWatcher: null,
+      repos: [this.nftTransferRepo],
+      rewinders: [new NftHoldingRewinder()],
+      backfill,
+      getContracts: async () => {
+        const c721 = await this.contractRepo.findActive(this.env.CHAIN_ID, 'ERC721');
+        const c1155 = await this.contractRepo.findActive(this.env.CHAIN_ID, 'ERC1155');
+        return [...c721, ...c1155];
+      },
+    }, persistService);
+  }
+
+  private async startNft(safeLatest: bigint, coordinator: ChainReorgCoordinator): Promise<void> {
+    if (this.nftContracts.length === 0 || !this.nftWriteCoordinator || !this.nftBackfill) return;
+
+    const writeCoordinator = this.nftWriteCoordinator;
+    const backfill = this.nftBackfill;
+    const contracts = this.nftContracts;
+
+    const persistService = new FinalizedPersistService<NftTransferRecord>(
+      this.pool, this.env, this.chain.http,
+      this.nftTransferRepo, this.checkpointRepo,
+      this.blockAnchorRepo, this.chainStateRepo,
+      this.nftPartitionService, 'nft',
+      this.writeSemaphore,
+    );
 
     for (const contract of contracts) {
       const stored = await this.checkpointRepo.get(contract.chainId, contract.address, 'nft');
@@ -221,8 +274,8 @@ export class IndexerApp {
     const resumeFrom = safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) > 0n
       ? safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) : 0n;
 
-    liveWatcher = new NftLiveWatcher(
-      this.env, this.chain.ws, writeCoordinator, persistService, reorgService,
+    const liveWatcher = new NftLiveWatcher(
+      this.env, this.chain.ws, writeCoordinator, persistService, coordinator,
       async () => {
         for (const contract of contracts) {
           const last = await this.checkpointRepo.get(contract.chainId, contract.address, 'nft');
@@ -233,6 +286,7 @@ export class IndexerApp {
       },
     );
     this.nftLiveWatcher = liveWatcher;
+    coordinator.attachLiveWatcher('nft', liveWatcher);
     liveWatcher.start(contracts, resumeFrom);
   }
 
@@ -249,7 +303,6 @@ export class IndexerApp {
     }
   }
 
-  /** 拉取链上真正最终化块号写入 indexer_chain_state，供物化 worker 作安全上界。 */
   private async updateFinalizedBlock(): Promise<void> {
     const finalized = await getFinalizedBlockNumber(this.chain.http, this.env);
     await this.chainStateRepo.setFinalizedBlock(this.env.CHAIN_ID, finalized);
@@ -257,8 +310,7 @@ export class IndexerApp {
 
   private async runReorgScanTick(): Promise<void> {
     try {
-      await this.erc20ReorgService?.scanAndRepair();
-      await this.nftReorgService?.scanAndRepair();
+      await this.chainReorgCoordinator?.scanAndRepair();
     } catch (err) {
       logger.error({ err }, '定时 reorg 扫描失败');
     }

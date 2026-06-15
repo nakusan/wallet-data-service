@@ -7,14 +7,14 @@ export class Erc20BackfillService {
     env;
     writeCoordinator;
     persistService;
-    reorgService;
+    reorgHandler;
     logFetcher;
     parser = new Erc20LogParser();
-    constructor(env, httpClient, writeCoordinator, persistService, reorgService) {
+    constructor(env, httpClient, writeCoordinator, persistService, reorgHandler) {
         this.env = env;
         this.writeCoordinator = writeCoordinator;
         this.persistService = persistService;
-        this.reorgService = reorgService;
+        this.reorgHandler = reorgHandler;
         this.logFetcher = new Erc20LogFetcher(httpClient);
     }
     async fillSegmented(contract, fromBlock, toBlock) {
@@ -53,7 +53,7 @@ export class Erc20BackfillService {
         catch (error) {
             if (error instanceof ReorgDetectedError) {
                 logger.warn({ symbol: contract.symbol, forkBlock: error.forkBlock.toString() }, '回填检测到 reorg');
-                await this.reorgService.onReorgDetected(error);
+                await this.reorgHandler.onReorgDetected(error);
                 return;
             }
             throw error;

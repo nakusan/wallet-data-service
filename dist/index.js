@@ -30,23 +30,48 @@ async function main() {
     const server = app.listen(env.PORT, () => {
         logger.info({ port: env.PORT }, 'HTTP server started');
     });
-    const shutdown = async (signal) => {
-        logger.info({ signal }, '收到关闭信号，开始优雅关闭');
-        server.close();
-        balanceSyncWorker.stop();
-        nftSyncWorker.stop();
-        await indexerApp.shutdown();
-        await Promise.all([apiPool.end(), workerPool.end()]);
-        await redis.quit();
-        logger.info('已完全关闭');
-        process.exit(0);
+    const SHUTDOWN_TIMEOUT_MS = 10_000;
+    let shuttingDown = false;
+    const shutdown = async (signal, exitCode = 0) => {
+        if (shuttingDown)
+            return;
+        shuttingDown = true;
+        const forceTimer = setTimeout(() => {
+            logger.fatal({ signal, exitCode }, '优雅关闭超时，强制退出');
+            process.exit(exitCode || 1);
+        }, SHUTDOWN_TIMEOUT_MS);
+        forceTimer.unref();
+        let code = exitCode;
+        try {
+            logger.info({ signal, exitCode }, '收到关闭信号，开始优雅关闭');
+            server.close();
+            balanceSyncWorker.stop();
+            nftSyncWorker.stop();
+            await indexerApp.shutdown();
+            await Promise.all([apiPool.end(), workerPool.end()]);
+            await redis.quit();
+            logger.info('已完全关闭');
+        }
+        catch (err) {
+            logger.error({ err }, '优雅关闭失败');
+            code = code || 1;
+        }
+        finally {
+            clearTimeout(forceTimer);
+            process.exit(code);
+        }
     };
-    process.on('SIGINT', () => void shutdown('SIGINT'));
-    process.on('SIGTERM', () => void shutdown('SIGTERM'));
-    process.on('uncaughtException', (err) => {
-        logger.error({ err }, '未捕获异常');
-        void shutdown('uncaughtException');
-    });
+    const fatal = (label, err) => {
+        logger.fatal({ err }, label);
+        void shutdown(label, 1).catch((e) => {
+            logger.fatal({ err: e }, 'shutdown 自身失败');
+            process.exit(1);
+        });
+    };
+    process.on('SIGINT', () => void shutdown('SIGINT', 0));
+    process.on('SIGTERM', () => void shutdown('SIGTERM', 0));
+    process.on('uncaughtException', (err) => fatal('uncaughtException', err));
+    process.on('unhandledRejection', (reason) => fatal('unhandledRejection', reason));
     await indexerApp.run();
     balanceSyncWorker.start();
     nftSyncWorker.start();

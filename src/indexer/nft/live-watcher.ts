@@ -9,7 +9,7 @@ import { NftLogParser } from './log-parser.js';
 import type { RawNftLog } from './log-fetcher.js';
 import type { ContractWriteCoordinator } from '../util/contract-write-coordinator.js';
 import type { FinalizedPersistService } from '../service/finalized-persist-service.js';
-import type { ReorgService } from '../service/reorg-service.js';
+import type { ReorgHandler } from '../service/chain-reorg-coordinator.js';
 
 const erc721Abi = parseAbi(ERC721_TRANSFER_ABI);
 const erc1155Abi = parseAbi(ERC1155_ABI);
@@ -30,21 +30,36 @@ export class NftLiveWatcher {
   private paused = false;
   private reconnectPromise: Promise<void> | null = null;
   private reconnectAttempt = 0;
+  private contracts: MonitoredContract[] = [];
+  private reorgStopped = false;
 
   constructor(
     private readonly env: Env,
     private readonly wsClient: PublicClient,
     private readonly writeCoordinator: ContractWriteCoordinator,
     private readonly persistService: FinalizedPersistService<NftTransferRecord>,
-    private readonly reorgService: ReorgService,
+    private readonly reorgHandler: ReorgHandler,
     private readonly onMiniBackfill: () => Promise<void>,
   ) {}
 
-  pause(): void { this.paused = true; }
-  resume(): void { this.paused = false; }
+  stopForReorg(): void {
+    this.reorgStopped = true;
+    this.paused = true;
+    this.stopWatching();
+  }
+
+  restartAfterReorg(fromBlock: bigint): void {
+    if (!this.shouldRun) return;
+    this.reorgStopped = false;
+    this.paused = false;
+    this.state = LiveState.WATCHING;
+    this.reconnectAttempt = 0;
+    this.subscribeAll(this.contracts, fromBlock);
+  }
 
   start(contracts: MonitoredContract[], fromBlock: bigint): void {
     if (this.state === LiveState.WATCHING) return;
+    this.contracts = contracts;
     this.shouldRun = true;
     this.state = LiveState.WATCHING;
     this.reconnectAttempt = 0;
@@ -119,8 +134,9 @@ export class NftLiveWatcher {
   }
 
   private scheduleReconnect(contracts: MonitoredContract[]): void {
-    if (!this.shouldRun 
-      || this.state === LiveState.RECONNECTING 
+    if (!this.shouldRun
+      || this.reorgStopped
+      || this.state === LiveState.RECONNECTING
       || this.reconnectPromise) return;
     this.reconnectPromise = this.runReconnectFlow(contracts).finally(() => { this.reconnectPromise = null; });
     void this.reconnectPromise;
@@ -183,8 +199,8 @@ export class NftLiveWatcher {
       await this.persistService.persistBatch(contract, records, maxBlock);
     } catch (error) {
       if (error instanceof ReorgDetectedError) { 
-        await this.reorgService.onReorgDetected(error); 
-        return; 
+        this.reorgHandler.onReorgDetected(error);
+        return;
       }
       throw error;
     }

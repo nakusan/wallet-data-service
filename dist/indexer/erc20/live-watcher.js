@@ -16,7 +16,7 @@ export class Erc20LiveWatcher {
     wsClient;
     writeCoordinator;
     persistService;
-    reorgService;
+    reorgHandler;
     onMiniBackfill;
     parser = new Erc20LogParser();
     unwatchFns = [];
@@ -25,19 +25,34 @@ export class Erc20LiveWatcher {
     paused = false;
     reconnectPromise = null;
     reconnectAttempt = 0;
-    constructor(env, wsClient, writeCoordinator, persistService, reorgService, onMiniBackfill) {
+    contracts = [];
+    reorgStopped = false;
+    constructor(env, wsClient, writeCoordinator, persistService, reorgHandler, onMiniBackfill) {
         this.env = env;
         this.wsClient = wsClient;
         this.writeCoordinator = writeCoordinator;
         this.persistService = persistService;
-        this.reorgService = reorgService;
+        this.reorgHandler = reorgHandler;
         this.onMiniBackfill = onMiniBackfill;
     }
-    pause() { this.paused = true; }
-    resume() { this.paused = false; }
+    stopForReorg() {
+        this.reorgStopped = true;
+        this.paused = true;
+        this.stopWatching();
+    }
+    restartAfterReorg(fromBlock) {
+        if (!this.shouldRun)
+            return;
+        this.reorgStopped = false;
+        this.paused = false;
+        this.state = LiveState.WATCHING;
+        this.reconnectAttempt = 0;
+        this.subscribeAll(this.contracts, fromBlock);
+    }
     start(contracts, fromBlock) {
         if (this.state === LiveState.WATCHING)
             return;
+        this.contracts = contracts;
         this.shouldRun = true;
         this.state = LiveState.WATCHING;
         this.reconnectAttempt = 0;
@@ -79,7 +94,7 @@ export class Erc20LiveWatcher {
         this.unwatchFns = [];
     }
     scheduleReconnect(contracts) {
-        if (!this.shouldRun || this.state === LiveState.RECONNECTING || this.reconnectPromise)
+        if (!this.shouldRun || this.reorgStopped || this.state === LiveState.RECONNECTING || this.reconnectPromise)
             return;
         this.reconnectPromise = this.runReconnectFlow(contracts).finally(() => {
             this.reconnectPromise = null;
@@ -87,36 +102,41 @@ export class Erc20LiveWatcher {
         void this.reconnectPromise;
     }
     async runReconnectFlow(contracts) {
-        if (!this.shouldRun)
-            return;
-        this.state = LiveState.RECONNECTING;
-        this.reconnectAttempt += 1;
-        this.stopWatching();
-        await this.writeCoordinator.drain();
         try {
-            await this.onMiniBackfill();
+            if (!this.shouldRun)
+                return;
+            this.state = LiveState.RECONNECTING;
+            this.reconnectAttempt += 1;
+            this.stopWatching();
+            await this.writeCoordinator.drain();
+            try {
+                await this.onMiniBackfill();
+            }
+            catch (err) {
+                logger.error({ err }, 'mini-backfill 失败');
+            }
+            if (!this.shouldRun) {
+                this.state = LiveState.STOPPED;
+                return;
+            }
+            if (this.reconnectAttempt > 1) {
+                const delayMs = Math.min(RECONNECT_MAX_BACKOFF_MS, 1000 * 2 ** (this.reconnectAttempt - 2));
+                await sleep(delayMs);
+            }
+            if (!this.shouldRun) {
+                this.state = LiveState.STOPPED;
+                return;
+            }
+            const safeLatest = await getSafeBlockNumber(this.wsClient, this.env.CONFIRMATION_DEPTH);
+            const resumeFrom = safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) > 0n
+                ? safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) : 0n;
+            this.state = LiveState.WATCHING;
+            this.reconnectAttempt = 0;
+            this.subscribeAll(contracts, resumeFrom);
         }
         catch (err) {
-            logger.error({ err }, 'mini-backfill 失败');
+            logger.error({ err }, 'WebSocket 重连流程失败');
         }
-        if (!this.shouldRun) {
-            this.state = LiveState.STOPPED;
-            return;
-        }
-        if (this.reconnectAttempt > 1) {
-            const delayMs = Math.min(RECONNECT_MAX_BACKOFF_MS, 1000 * 2 ** (this.reconnectAttempt - 2));
-            await sleep(delayMs);
-        }
-        if (!this.shouldRun) {
-            this.state = LiveState.STOPPED;
-            return;
-        }
-        const safeLatest = await getSafeBlockNumber(this.wsClient, this.env.CONFIRMATION_DEPTH);
-        const resumeFrom = safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) > 0n
-            ? safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) : 0n;
-        this.state = LiveState.WATCHING;
-        this.reconnectAttempt = 0;
-        this.subscribeAll(contracts, resumeFrom);
     }
     async handleLogs(contract, logs) {
         if (this.paused || this.state !== LiveState.WATCHING || logs.length === 0)
@@ -139,7 +159,7 @@ export class Erc20LiveWatcher {
         }
         catch (error) {
             if (error instanceof ReorgDetectedError) {
-                await this.reorgService.onReorgDetected(error);
+                await this.reorgHandler.onReorgDetected(error);
                 return;
             }
             throw error;

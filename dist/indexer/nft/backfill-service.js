@@ -7,15 +7,15 @@ export class NftBackfillService {
     env;
     writeCoordinator;
     persistService;
-    reorgService;
+    reorgHandler;
     nftRepo;
     logFetcher;
     parser = new NftLogParser();
-    constructor(env, httpClient, writeCoordinator, persistService, reorgService, nftRepo) {
+    constructor(env, httpClient, writeCoordinator, persistService, reorgHandler, nftRepo) {
         this.env = env;
         this.writeCoordinator = writeCoordinator;
         this.persistService = persistService;
-        this.reorgService = reorgService;
+        this.reorgHandler = reorgHandler;
         this.nftRepo = nftRepo;
         this.logFetcher = new NftLogFetcher(httpClient);
     }
@@ -52,7 +52,7 @@ export class NftBackfillService {
         }
         catch (error) {
             if (error instanceof ReorgDetectedError) {
-                await this.reorgService.onReorgDetected(error);
+                await this.reorgHandler.onReorgDetected(error);
                 return;
             }
             throw error;
