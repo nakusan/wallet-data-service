@@ -7,6 +7,7 @@ import type { IndexerType, MonitoredContract } from '../domain/types.js';
 import { BlockReader } from '../chain/block-reader.js';
 import { getSafeBlockNumber } from '../chain/viem-client.js';
 import { logger } from '../../infrastructure/logger/logger.js';
+import type { WriteSemaphore } from '../../infrastructure/db/write-semaphore.js';
 import type { BlockAnchorRepo } from '../db/block-anchor-repo.js';
 import type { ChainStateRepo } from '../db/chain-state-repo.js';
 import type { CheckpointRepo } from '../db/checkpoint-repo.js';
@@ -60,6 +61,7 @@ export class ReorgService {
     private readonly writeCoordinator: ContractWriteCoordinator,
     private readonly hooks: ReorgLifecycleHooks,
     private readonly indexerType: IndexerType,
+    private readonly writeSemaphore: WriteSemaphore,
     private readonly rewinders: MaterializationRewinder[] = [],
   ) {
     this.blockReader = new BlockReader(this.httpClient);
@@ -116,6 +118,7 @@ export class ReorgService {
 
         const ancestorHash = await this.resolveAncestorHash(this.env.CHAIN_ID, commonAncestor);
 
+        const releaseSem = await this.writeSemaphore.acquire();
         const client = await this.pool.connect();
         try {
           await client.query('BEGIN');
@@ -148,6 +151,7 @@ export class ReorgService {
           throw err;
         } finally {
           client.release();
+          releaseSem();
         }
 
         // 确认深度上界（非链上真正 finalized），reorg 回滚后据此重填到安全高度。

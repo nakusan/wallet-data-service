@@ -15,11 +15,12 @@ export class ReorgService {
     writeCoordinator;
     hooks;
     indexerType;
+    writeSemaphore;
     rewinders;
     blockReader;
     handling = false;
     backfill = null;
-    constructor(pool, env, httpClient, contractRepo, checkpointRepo, chainStateRepo, blockAnchorRepo, repos, persistService, writeCoordinator, hooks, indexerType, rewinders = []) {
+    constructor(pool, env, httpClient, contractRepo, checkpointRepo, chainStateRepo, blockAnchorRepo, repos, persistService, writeCoordinator, hooks, indexerType, writeSemaphore, rewinders = []) {
         this.pool = pool;
         this.env = env;
         this.httpClient = httpClient;
@@ -32,6 +33,7 @@ export class ReorgService {
         this.writeCoordinator = writeCoordinator;
         this.hooks = hooks;
         this.indexerType = indexerType;
+        this.writeSemaphore = writeSemaphore;
         this.rewinders = rewinders;
         this.blockReader = new BlockReader(this.httpClient);
     }
@@ -81,6 +83,7 @@ export class ReorgService {
                 this.hooks.pauseIndexing();
                 await this.hooks.drainWrites();
                 const ancestorHash = await this.resolveAncestorHash(this.env.CHAIN_ID, commonAncestor);
+                const releaseSem = await this.writeSemaphore.acquire();
                 const client = await this.pool.connect();
                 try {
                     await client.query('BEGIN');
@@ -110,6 +113,7 @@ export class ReorgService {
                 }
                 finally {
                     client.release();
+                    releaseSem();
                 }
                 // 确认深度上界（非链上真正 finalized），reorg 回滚后据此重填到安全高度。
                 const safeUpper = await getSafeBlockNumber(this.httpClient, this.env.CONFIRMATION_DEPTH);

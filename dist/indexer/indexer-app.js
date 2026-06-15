@@ -20,6 +20,7 @@ export class IndexerApp {
     pool;
     env;
     chain;
+    writeSemaphore;
     erc20LiveWatcher = null;
     nftLiveWatcher = null;
     partitionTimer = null;
@@ -36,18 +37,19 @@ export class IndexerApp {
     nftTransferRepo;
     nftPartitionService;
     nftReorgService = null;
-    constructor(pool, env, chain) {
+    constructor(pool, env, chain, writeSemaphore) {
         this.pool = pool;
         this.env = env;
         this.chain = chain;
+        this.writeSemaphore = writeSemaphore;
         this.contractRepo = new ContractRepo(pool);
         this.checkpointRepo = new CheckpointRepo(pool);
         this.chainStateRepo = new ChainStateRepo(pool);
         this.blockAnchorRepo = new BlockAnchorRepo(pool);
         this.erc20TransferRepo = new Erc20TransferRepo(pool);
-        this.erc20PartitionService = new PartitionService(new PartitionRepo(pool, 'token_transfers'), BigInt(env.PARTITION_BLOCK_RANGE));
+        this.erc20PartitionService = new PartitionService(new PartitionRepo(pool, 'token_transfers'), BigInt(env.PARTITION_BLOCK_RANGE), writeSemaphore);
         this.nftTransferRepo = new NftTransferRepo(pool);
-        this.nftPartitionService = new PartitionService(new PartitionRepo(pool, 'nft_transfers'), BigInt(env.PARTITION_BLOCK_RANGE));
+        this.nftPartitionService = new PartitionService(new PartitionRepo(pool, 'nft_transfers'), BigInt(env.PARTITION_BLOCK_RANGE), writeSemaphore);
     }
     async run() {
         await this.chainStateRepo.ensureInitialized(this.env.CHAIN_ID);
@@ -84,13 +86,13 @@ export class IndexerApp {
             return;
         }
         const writeCoordinator = new ContractWriteCoordinator();
-        const persistService = new FinalizedPersistService(this.pool, this.env, this.chain.http, this.erc20TransferRepo, this.checkpointRepo, this.blockAnchorRepo, this.chainStateRepo, this.erc20PartitionService, 'erc20');
+        const persistService = new FinalizedPersistService(this.pool, this.env, this.chain.http, this.erc20TransferRepo, this.checkpointRepo, this.blockAnchorRepo, this.chainStateRepo, this.erc20PartitionService, 'erc20', this.writeSemaphore);
         let liveWatcher = null;
         const reorgService = new ReorgService(this.pool, this.env, this.chain.http, this.contractRepo, this.checkpointRepo, this.chainStateRepo, this.blockAnchorRepo, [this.erc20TransferRepo], persistService, writeCoordinator, {
             pauseIndexing: () => liveWatcher?.pause(),
             resumeIndexing: () => liveWatcher?.resume(),
             drainWrites: () => writeCoordinator.drain(),
-        }, 'erc20', [new Erc20BalanceRewinder()]);
+        }, 'erc20', this.writeSemaphore, [new Erc20BalanceRewinder()]);
         this.erc20ReorgService = reorgService;
         const backfill = new Erc20BackfillService(this.env, this.chain.http, writeCoordinator, persistService, reorgService);
         reorgService.setBackfill(backfill);
@@ -125,13 +127,13 @@ export class IndexerApp {
             return;
         }
         const writeCoordinator = new ContractWriteCoordinator();
-        const persistService = new FinalizedPersistService(this.pool, this.env, this.chain.http, this.nftTransferRepo, this.checkpointRepo, this.blockAnchorRepo, this.chainStateRepo, this.nftPartitionService, 'nft');
+        const persistService = new FinalizedPersistService(this.pool, this.env, this.chain.http, this.nftTransferRepo, this.checkpointRepo, this.blockAnchorRepo, this.chainStateRepo, this.nftPartitionService, 'nft', this.writeSemaphore);
         let liveWatcher = null;
         const reorgService = new ReorgService(this.pool, this.env, this.chain.http, this.contractRepo, this.checkpointRepo, this.chainStateRepo, this.blockAnchorRepo, [this.nftTransferRepo], persistService, writeCoordinator, {
             pauseIndexing: () => liveWatcher?.pause(),
             resumeIndexing: () => liveWatcher?.resume(),
             drainWrites: () => writeCoordinator.drain(),
-        }, 'nft', [new NftHoldingRewinder()]);
+        }, 'nft', this.writeSemaphore, [new NftHoldingRewinder()]);
         this.nftReorgService = reorgService;
         const backfill = new NftBackfillService(this.env, this.chain.http, writeCoordinator, persistService, reorgService, this.nftTransferRepo);
         reorgService.setBackfill(backfill);

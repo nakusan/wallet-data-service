@@ -3,7 +3,8 @@ import type Redis from 'ioredis';
 import { ZERO_ADDRESS, MATERIALIZATION_LOCK_CLASS } from '../../config/constants.js';
 import { CacheKeys } from '../../infrastructure/cache/redis-client.js';
 import { logger } from '../../infrastructure/logger/logger.js';
-import { BalanceSyncStateRepo } from './balance-sync-state-repo.js';
+import type { WriteSemaphore } from '../../infrastructure/db/write-semaphore.js';
+import { BalanceSyncStateRepo, type LaggingContract } from './balance-sync-state-repo.js';
 
 const BATCH_BLOCKS = 2000n;
 const MAX_CONTRACTS_PER_TICK = 10;
@@ -28,6 +29,7 @@ export class NftHoldingSyncWorker {
     private readonly redis: Redis,
     private readonly chainId: number,
     private readonly intervalMs: number,
+    private readonly writeSemaphore: WriteSemaphore,
   ) {}
 
   start(): void {
@@ -56,88 +58,107 @@ export class NftHoldingSyncWorker {
   }
 
   private async sync(): Promise<void> {
-    const client = await this.pool.connect();
+    const { safeUpper, lagging } = await this.loadWorkQueue();
+    if (lagging.length === 0) return;
+
     const affectedAddrs = new Set<string>();
     let syncedCount = 0;
-    try {
-      await client.query('BEGIN');
-      // 与 ReorgService 回滚互斥
-      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [
-        MATERIALIZATION_LOCK_CLASS,
-        this.chainId,
-      ]);
 
+    for (const item of lagging) {
+      const result = await this.syncOneContract(item, safeUpper);
+      if (!result) continue;
+      syncedCount += result.transferCount;
+      for (const addr of result.affectedAddrs) affectedAddrs.add(addr);
+    }
+
+    if (syncedCount > 0) {
+      logger.debug({ count: syncedCount }, 'NFT 持有同步批次完成');
+    }
+
+    const keys = [...affectedAddrs].map((a) => CacheKeys.nftHoldings(this.chainId, a));
+    if (keys.length > 0) await this.redis.del(...keys);
+  }
+
+  private async loadWorkQueue(): Promise<{ safeUpper: bigint; lagging: LaggingContract[] }> {
+    const client = await this.pool.connect();
+    try {
       const { rows: chainRows } = await client.query(
         `SELECT LEAST(min_indexed_checkpoint, finalized_block) AS safe_upper
          FROM indexer_chain_state WHERE chain_id=$1`,
         [this.chainId],
       );
       const safeUpper = BigInt(chainRows[0]?.safe_upper ?? 0);
-
       const lagging = await this.syncStateRepo.pickLaggingNft(
         client, this.chainId, safeUpper, MAX_CONTRACTS_PER_TICK,
       );
-      if (lagging.length === 0) {
-        await client.query('COMMIT');
-        return;
+      return { safeUpper, lagging };
+    } finally {
+      client.release();
+    }
+  }
+
+  private async syncOneContract(
+    { contractAddress, lastSynced }: LaggingContract,
+    safeUpper: bigint,
+  ): Promise<{ transferCount: number; affectedAddrs: string[] } | null> {
+    const fromBlock = lastSynced + 1n;
+    if (fromBlock > safeUpper) return null;
+
+    const toBlock = fromBlock + BATCH_BLOCKS - 1n <= safeUpper
+      ? fromBlock + BATCH_BLOCKS - 1n
+      : safeUpper;
+
+    const releaseSem = await this.writeSemaphore.acquire();
+    const client = await this.pool.connect();
+    const affectedAddrs: string[] = [];
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [
+        MATERIALIZATION_LOCK_CLASS,
+        this.chainId,
+      ]);
+
+      const { rows } = await client.query<NftTransferRow>(
+        `SELECT contract_address, token_id, token_standard,
+                from_address, to_address, amount, block_number
+         FROM (
+           SELECT contract_address, token_id, token_standard, from_address,
+                  to_address, amount, block_number, log_index, batch_index
+           FROM nft_transfers
+           WHERE chain_id=$1 AND contract_address=$2 AND status='indexed'
+             AND block_number BETWEEN $3 AND $4
+           UNION ALL
+           SELECT contract_address, token_id, token_standard, from_address,
+                  to_address, amount, block_number, log_index, batch_index
+           FROM archive.nft_transfers
+           WHERE chain_id=$1 AND contract_address=$2 AND status='indexed'
+             AND block_number BETWEEN $3 AND $4
+         ) t
+         ORDER BY block_number, log_index, batch_index`,
+        [this.chainId, contractAddress.toLowerCase(), fromBlock.toString(), toBlock.toString()],
+      );
+
+      for (const row of rows) {
+        await this.applyTransfer(client, row, toBlock);
+        affectedAddrs.push(row.from_address, row.to_address);
       }
 
-      for (const { contractAddress, lastSynced } of lagging) {
-        const fromBlock = lastSynced + 1n;
-        if (fromBlock > safeUpper) continue;
-
-        const toBlock = fromBlock + BATCH_BLOCKS - 1n <= safeUpper
-          ? fromBlock + BATCH_BLOCKS - 1n
-          : safeUpper;
-
-        const { rows } = await client.query<NftTransferRow>(
-          `SELECT contract_address, token_id, token_standard,
-                  from_address, to_address, amount, block_number
-           FROM (
-             SELECT contract_address, token_id, token_standard, from_address,
-                    to_address, amount, block_number, log_index, batch_index
-             FROM nft_transfers
-             WHERE chain_id=$1 AND contract_address=$2 AND status='indexed'
-               AND block_number BETWEEN $3 AND $4
-             UNION ALL
-             SELECT contract_address, token_id, token_standard, from_address,
-                    to_address, amount, block_number, log_index, batch_index
-             FROM archive.nft_transfers
-             WHERE chain_id=$1 AND contract_address=$2 AND status='indexed'
-               AND block_number BETWEEN $3 AND $4
-           ) t
-           ORDER BY block_number, log_index, batch_index`,
-          [this.chainId, contractAddress.toLowerCase(), fromBlock.toString(), toBlock.toString()],
-        );
-
-        for (const row of rows) {
-          await this.applyTransfer(client, row, toBlock);
-          affectedAddrs.add(row.from_address);
-          affectedAddrs.add(row.to_address);
-        }
-
-        await this.syncStateRepo.setLastSynced(
-          client, this.chainId, contractAddress, 'nft', toBlock,
-        );
-        syncedCount += rows.length;
-        logger.debug(
-          { contract: contractAddress, from: fromBlock.toString(), to: toBlock.toString(), count: rows.length },
-          'NFT 持有同步完成',
-        );
-      }
-
+      await this.syncStateRepo.setLastSynced(
+        client, this.chainId, contractAddress, 'nft', toBlock,
+      );
       await client.query('COMMIT');
-      if (syncedCount > 0) {
-        logger.debug({ count: syncedCount }, 'NFT 持有同步批次完成');
-      }
 
-      const keys = [...affectedAddrs].map((a) => CacheKeys.nftHoldings(this.chainId, a));
-      if (keys.length > 0) await this.redis.del(...keys);
+      logger.debug(
+        { contract: contractAddress, from: fromBlock.toString(), to: toBlock.toString(), count: rows.length },
+        'NFT 持有同步完成',
+      );
+      return { transferCount: rows.length, affectedAddrs };
     } catch (err) {
       await client.query('ROLLBACK');
       throw err;
     } finally {
       client.release();
+      releaseSem();
     }
   }
 
@@ -165,7 +186,6 @@ export class NftHoldingSyncWorker {
         );
       }
     } else {
-      // ERC1155: 减 from（UPSERT，避免行不存在时静默丢失扣减）
       if (from_address !== ZERO_ADDRESS) {
         await client.query(
           `INSERT INTO nft_holdings
@@ -181,7 +201,6 @@ export class NftHoldingSyncWorker {
           ],
         );
       }
-      // 加 to
       if (to_address !== ZERO_ADDRESS) {
         await client.query(
           `INSERT INTO nft_holdings
@@ -194,7 +213,6 @@ export class NftHoldingSyncWorker {
           [this.chainId, contract_address, token_id, to_address, amountBn.toString(), blockNumber.toString()],
         );
       }
-      // 清理零持有
       if (from_address !== ZERO_ADDRESS) {
         await client.query(
           `DELETE FROM nft_holdings

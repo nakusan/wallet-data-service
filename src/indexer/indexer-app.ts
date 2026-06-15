@@ -20,6 +20,7 @@ import { NftBackfillService } from './nft/backfill-service.js';
 import { NftLiveWatcher } from './nft/live-watcher.js';
 import type { NftTransferRecord, TransferRecord } from './domain/types.js';
 import { logger } from '../infrastructure/logger/logger.js';
+import type { WriteSemaphore } from '../infrastructure/db/write-semaphore.js';
 
 export class IndexerApp {
   private erc20LiveWatcher: Erc20LiveWatcher | null = null;
@@ -46,6 +47,7 @@ export class IndexerApp {
     private readonly pool: Pool,
     private readonly env: Env,
     private readonly chain: ChainClients,
+    private readonly writeSemaphore: WriteSemaphore,
   ) {
     this.contractRepo = new ContractRepo(pool);
     this.checkpointRepo = new CheckpointRepo(pool);
@@ -56,12 +58,14 @@ export class IndexerApp {
     this.erc20PartitionService = new PartitionService(
       new PartitionRepo(pool, 'token_transfers'),
       BigInt(env.PARTITION_BLOCK_RANGE),
+      writeSemaphore,
     );
 
     this.nftTransferRepo = new NftTransferRepo(pool);
     this.nftPartitionService = new PartitionService(
       new PartitionRepo(pool, 'nft_transfers'),
       BigInt(env.PARTITION_BLOCK_RANGE),
+      writeSemaphore,
     );
   }
 
@@ -116,6 +120,7 @@ export class IndexerApp {
       this.erc20TransferRepo, this.checkpointRepo,
       this.blockAnchorRepo, this.chainStateRepo,
       this.erc20PartitionService, 'erc20',
+      this.writeSemaphore,
     );
 
     let liveWatcher: Erc20LiveWatcher | null = null;
@@ -131,6 +136,7 @@ export class IndexerApp {
         drainWrites: () => writeCoordinator.drain(),
       },
       'erc20',
+      this.writeSemaphore,
       [new Erc20BalanceRewinder()],
     );
     this.erc20ReorgService = reorgService;
@@ -179,6 +185,7 @@ export class IndexerApp {
       this.nftTransferRepo, this.checkpointRepo,
       this.blockAnchorRepo, this.chainStateRepo,
       this.nftPartitionService, 'nft',
+      this.writeSemaphore,
     );
 
     let liveWatcher: NftLiveWatcher | null = null;
@@ -193,6 +200,7 @@ export class IndexerApp {
         drainWrites: () => writeCoordinator.drain(),
       },
       'nft',
+      this.writeSemaphore,
       [new NftHoldingRewinder()],
     );
     this.nftReorgService = reorgService;

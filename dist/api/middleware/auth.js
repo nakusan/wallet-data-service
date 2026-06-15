@@ -2,15 +2,31 @@ import jwt from 'jsonwebtoken';
 import { createHash } from 'crypto';
 import { CacheKeys } from '../../infrastructure/cache/redis-client.js';
 import { loadEnv } from '../../config/env.js';
-export function authMiddleware(requiredScopes, redis) {
+function readBearerToken(req) {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith('Bearer '))
+        return null;
+    return authHeader.slice(7);
+}
+export async function isTokenRevoked(redis, jti) {
+    return (await redis.exists(CacheKeys.jwtRevoked(jti))) === 1;
+}
+export async function revokeToken(redis, payload) {
+    const env = loadEnv();
+    const ttl = payload.exp
+        ? Math.max(1, payload.exp - Math.floor(Date.now() / 1000))
+        : env.JWT_TTL_SECONDS;
+    await redis.set(CacheKeys.jwtRevoked(payload.jti), '1', 'EX', ttl);
+}
+/** 仅校验 JWT 签名与黑名单，不校验 scope / 限流 */
+export function jwtAuthMiddleware(redis) {
     const env = loadEnv();
     return async (req, res, next) => {
-        const authHeader = req.headers.authorization;
-        if (!authHeader?.startsWith('Bearer ')) {
+        const token = readBearerToken(req);
+        if (!token) {
             res.status(401).json({ error: 'missing_token' });
             return;
         }
-        const token = authHeader.slice(7);
         let payload;
         try {
             payload = jwt.verify(token, env.JWT_SECRET);
@@ -19,9 +35,32 @@ export function authMiddleware(requiredScopes, redis) {
             res.status(401).json({ error: 'invalid_token' });
             return;
         }
-        // JWT 黑名单检查（注销后的 token）
-        const revoked = await redis.sismember(CacheKeys.jwtRevoked, payload.jti);
-        if (revoked) {
+        if (await isTokenRevoked(redis, payload.jti)) {
+            res.status(401).json({ error: 'token_revoked' });
+            return;
+        }
+        req.apiKeyId = payload.sub;
+        req.jwtPayload = payload;
+        next();
+    };
+}
+export function authMiddleware(requiredScopes, redis) {
+    const env = loadEnv();
+    return async (req, res, next) => {
+        const token = readBearerToken(req);
+        if (!token) {
+            res.status(401).json({ error: 'missing_token' });
+            return;
+        }
+        let payload;
+        try {
+            payload = jwt.verify(token, env.JWT_SECRET);
+        }
+        catch {
+            res.status(401).json({ error: 'invalid_token' });
+            return;
+        }
+        if (await isTokenRevoked(redis, payload.jti)) {
             res.status(401).json({ error: 'token_revoked' });
             return;
         }

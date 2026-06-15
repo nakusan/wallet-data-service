@@ -40,18 +40,12 @@ export class CacheService {
             await this.redis.expire(key, windowSec);
         return count;
     }
-    async addToSet(key, member) {
-        await this.redis.sadd(key, member);
-    }
-    async isMemberOfSet(key, member) {
-        return (await this.redis.sismember(key, member)) === 1;
-    }
 }
 export const CacheKeys = {
     tokenBalances: (chainId, addr) => `bal:${chainId}:${addr.toLowerCase()}`,
     nftHoldings: (chainId, addr) => `nft:${chainId}:${addr.toLowerCase()}`,
     topHolders: (chainId, contract, n) => `holders:${chainId}:${contract.toLowerCase()}:${n}`,
     nativeBalance: (chainId, addr) => `native:${chainId}:${addr.toLowerCase()}`,
-    jwtRevoked: 'jwt:revoked',
+    jwtRevoked: (jti) => `jwt:revoked:${jti}`,
 };
 //# sourceMappingURL=redis-client.js.map

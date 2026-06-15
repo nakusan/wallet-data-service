@@ -3,7 +3,8 @@ import type Redis from 'ioredis';
 import { MATERIALIZATION_LOCK_CLASS, ZERO_ADDRESS } from '../../config/constants.js';
 import { CacheKeys } from '../../infrastructure/cache/redis-client.js';
 import { logger } from '../../infrastructure/logger/logger.js';
-import { BalanceSyncStateRepo } from './balance-sync-state-repo.js';
+import type { WriteSemaphore } from '../../infrastructure/db/write-semaphore.js';
+import { BalanceSyncStateRepo, type LaggingContract } from './balance-sync-state-repo.js';
 
 const BATCH_BLOCKS = 5000n;
 const MAX_CONTRACTS_PER_TICK = 10;
@@ -18,6 +19,7 @@ export class BalanceSyncWorker {
     private readonly redis: Redis,
     private readonly chainId: number,
     private readonly intervalMs: number,
+    private readonly writeSemaphore: WriteSemaphore,
   ) {}
 
   start(): void {
@@ -46,116 +48,132 @@ export class BalanceSyncWorker {
   }
 
   private async sync(): Promise<void> {
-    const client = await this.pool.connect();
-    const cacheRanges: Array<{ contractAddress: string; fromBlock: bigint; toBlock: bigint }> = [];
-    try {
-      await client.query('BEGIN');
-      // 与 ReorgService 回滚互斥：保证水位线读取与余额写入之间不被 reorg 穿插
-      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [
-        MATERIALIZATION_LOCK_CLASS,
-        this.chainId,
-      ]);
+    const { safeUpper, lagging } = await this.loadWorkQueue();
+    if (lagging.length === 0) return;
 
+    const cacheRanges: Array<{ contractAddress: string; fromBlock: bigint; toBlock: bigint }> = [];
+
+    for (const item of lagging) {
+      const range = await this.syncOneContract(item, safeUpper);
+      if (range) cacheRanges.push(range);
+    }
+
+    for (const { contractAddress, fromBlock, toBlock } of cacheRanges) {
+      logger.debug(
+        { contract: contractAddress, from: fromBlock.toString(), to: toBlock.toString() },
+        'ERC20 余额同步完成',
+      );
+      await this.invalidateAffectedCache(contractAddress, fromBlock, toBlock);
+    }
+  }
+
+  private async loadWorkQueue(): Promise<{ safeUpper: bigint; lagging: LaggingContract[] }> {
+    const client = await this.pool.connect();
+    try {
       const { rows: chainRows } = await client.query(
         `SELECT LEAST(min_indexed_checkpoint, finalized_block) AS safe_upper
          FROM indexer_chain_state WHERE chain_id=$1`,
         [this.chainId],
       );
       const safeUpper = BigInt(chainRows[0]?.safe_upper ?? 0);
-
       const lagging = await this.syncStateRepo.pickLaggingErc20(
         client, this.chainId, safeUpper, MAX_CONTRACTS_PER_TICK,
       );
-      if (lagging.length === 0) {
-        await client.query('COMMIT');
-        return;
-      }
+      return { safeUpper, lagging };
+    } finally {
+      client.release();
+    }
+  }
 
-      for (const { contractAddress, lastSynced } of lagging) {
-        const fromBlock = lastSynced + 1n;
-        if (fromBlock > safeUpper) continue;
+  private async syncOneContract(
+    { contractAddress, lastSynced }: LaggingContract,
+    safeUpper: bigint,
+  ): Promise<{ contractAddress: string; fromBlock: bigint; toBlock: bigint } | null> {
+    const fromBlock = lastSynced + 1n;
+    if (fromBlock > safeUpper) return null;
 
-        const toBlock = fromBlock + BATCH_BLOCKS - 1n <= safeUpper
-          ? fromBlock + BATCH_BLOCKS - 1n
-          : safeUpper;
+    const toBlock = fromBlock + BATCH_BLOCKS - 1n <= safeUpper
+      ? fromBlock + BATCH_BLOCKS - 1n
+      : safeUpper;
 
-        await client.query(
-          `WITH delta AS (
-             SELECT chain_id, contract_address, to_address AS holder,
-                    SUM(amount_raw::NUMERIC) AS d
-             FROM token_transfers
-             WHERE chain_id=$1 AND contract_address=$2 AND status='indexed'
-               AND block_number BETWEEN $3 AND $4 AND to_address<>$5
-             GROUP BY chain_id, contract_address, to_address
-             UNION ALL
-             SELECT chain_id, contract_address, from_address AS holder,
-                    -SUM(amount_raw::NUMERIC) AS d
-             FROM token_transfers
-             WHERE chain_id=$1 AND contract_address=$2 AND status='indexed'
-               AND block_number BETWEEN $3 AND $4 AND from_address<>$5
-             GROUP BY chain_id, contract_address, from_address
-             UNION ALL
-             SELECT chain_id, contract_address, to_address AS holder,
-                    SUM(amount_raw::NUMERIC) AS d
-             FROM archive.token_transfers
-             WHERE chain_id=$1 AND contract_address=$2 AND status='indexed'
-               AND block_number BETWEEN $3 AND $4 AND to_address<>$5
-             GROUP BY chain_id, contract_address, to_address
-             UNION ALL
-             SELECT chain_id, contract_address, from_address AS holder,
-                    -SUM(amount_raw::NUMERIC) AS d
-             FROM archive.token_transfers
-             WHERE chain_id=$1 AND contract_address=$2 AND status='indexed'
-               AND block_number BETWEEN $3 AND $4 AND from_address<>$5
-             GROUP BY chain_id, contract_address, from_address
-           ),
-           net AS (
-             SELECT chain_id, contract_address, holder,
-                    SUM(d) AS net_delta
-             FROM delta GROUP BY chain_id, contract_address, holder
-           )
-           INSERT INTO token_balances
-             (chain_id, contract_address, holder_address,
-              symbol, decimals, balance_raw, last_transfer_block)
-           SELECT n.chain_id, n.contract_address, n.holder,
-                  mc.symbol, mc.decimals,
-                  n.net_delta,
-                  $4
-           FROM net n
-           JOIN monitored_contracts mc
-             ON mc.chain_id=n.chain_id AND mc.address=n.contract_address
-           ON CONFLICT (chain_id, contract_address, holder_address) DO UPDATE
-             SET balance_raw = token_balances.balance_raw + EXCLUDED.balance_raw,
-                 last_transfer_block = EXCLUDED.last_transfer_block,
-                 updated_at = NOW()`,
-          [
-            this.chainId,
-            contractAddress.toLowerCase(),
-            fromBlock.toString(),
-            toBlock.toString(),
-            ZERO_ADDRESS,
-          ],
-        );
+    const releaseSem = await this.writeSemaphore.acquire();
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [
+        MATERIALIZATION_LOCK_CLASS,
+        this.chainId,
+      ]);
 
-        await this.syncStateRepo.setLastSynced(
-          client, this.chainId, contractAddress, 'erc20', toBlock,
-        );
-        cacheRanges.push({ contractAddress, fromBlock, toBlock });
-      }
+      await client.query(
+        `WITH delta AS (
+           SELECT chain_id, contract_address, to_address AS holder,
+                  SUM(amount_raw::NUMERIC) AS d
+           FROM token_transfers
+           WHERE chain_id=$1 AND contract_address=$2 AND status='indexed'
+             AND block_number BETWEEN $3 AND $4 AND to_address<>$5
+           GROUP BY chain_id, contract_address, to_address
+           UNION ALL
+           SELECT chain_id, contract_address, from_address AS holder,
+                  -SUM(amount_raw::NUMERIC) AS d
+           FROM token_transfers
+           WHERE chain_id=$1 AND contract_address=$2 AND status='indexed'
+             AND block_number BETWEEN $3 AND $4 AND from_address<>$5
+           GROUP BY chain_id, contract_address, from_address
+           UNION ALL
+           SELECT chain_id, contract_address, to_address AS holder,
+                  SUM(amount_raw::NUMERIC) AS d
+           FROM archive.token_transfers
+           WHERE chain_id=$1 AND contract_address=$2 AND status='indexed'
+             AND block_number BETWEEN $3 AND $4 AND to_address<>$5
+           GROUP BY chain_id, contract_address, to_address
+           UNION ALL
+           SELECT chain_id, contract_address, from_address AS holder,
+                  -SUM(amount_raw::NUMERIC) AS d
+           FROM archive.token_transfers
+           WHERE chain_id=$1 AND contract_address=$2 AND status='indexed'
+             AND block_number BETWEEN $3 AND $4 AND from_address<>$5
+           GROUP BY chain_id, contract_address, from_address
+         ),
+         net AS (
+           SELECT chain_id, contract_address, holder,
+                  SUM(d) AS net_delta
+           FROM delta GROUP BY chain_id, contract_address, holder
+         )
+         INSERT INTO token_balances
+           (chain_id, contract_address, holder_address,
+            symbol, decimals, balance_raw, last_transfer_block)
+         SELECT n.chain_id, n.contract_address, n.holder,
+                mc.symbol, mc.decimals,
+                n.net_delta,
+                $4
+         FROM net n
+         JOIN monitored_contracts mc
+           ON mc.chain_id=n.chain_id AND mc.address=n.contract_address
+         ON CONFLICT (chain_id, contract_address, holder_address) DO UPDATE
+           SET balance_raw = token_balances.balance_raw + EXCLUDED.balance_raw,
+               last_transfer_block = EXCLUDED.last_transfer_block,
+               updated_at = NOW()`,
+        [
+          this.chainId,
+          contractAddress.toLowerCase(),
+          fromBlock.toString(),
+          toBlock.toString(),
+          ZERO_ADDRESS,
+        ],
+      );
 
+      await this.syncStateRepo.setLastSynced(
+        client, this.chainId, contractAddress, 'erc20', toBlock,
+      );
       await client.query('COMMIT');
-      for (const { contractAddress, fromBlock, toBlock } of cacheRanges) {
-        logger.debug(
-          { contract: contractAddress, from: fromBlock.toString(), to: toBlock.toString() },
-          'ERC20 余额同步完成',
-        );
-        await this.invalidateAffectedCache(contractAddress, fromBlock, toBlock);
-      }
+      return { contractAddress, fromBlock, toBlock };
     } catch (err) {
       await client.query('ROLLBACK');
       throw err;
     } finally {
       client.release();
+      releaseSem();
     }
   }
 

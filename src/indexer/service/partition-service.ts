@@ -1,5 +1,6 @@
-import type { PartitionRepo } from '../db/partition-repo.js';
 import { logger } from '../../infrastructure/logger/logger.js';
+import type { WriteSemaphore } from '../../infrastructure/db/write-semaphore.js';
+import type { PartitionRepo } from '../db/partition-repo.js';
 
 export class PartitionService {
   private ensureLock: Promise<void> = Promise.resolve();
@@ -7,6 +8,7 @@ export class PartitionService {
   constructor(
     private readonly partitionRepo: PartitionRepo,
     private readonly partitionBlockRange: bigint,
+    private readonly writeSemaphore: WriteSemaphore,
   ) {}
 
   async ensureThrough(blockNumber: bigint): Promise<void> {
@@ -20,21 +22,26 @@ export class PartitionService {
   }
 
   private async doEnsureThrough(blockNumber: bigint): Promise<void> {
-    const range = this.partitionBlockRange;
-    let upper =
-      (await this.partitionRepo.getMaxHotPartitionUpperBound()) ??
-      (blockNumber / range) * range;
+    const releaseSem = await this.writeSemaphore.acquire();
+    try {
+      const range = this.partitionBlockRange;
+      let upper =
+        (await this.partitionRepo.getMaxHotPartitionUpperBound()) ??
+        (blockNumber / range) * range;
 
-    while (upper <= blockNumber) {
-      const blockFrom = upper;
-      const blockTo = upper + range;
-      const name = `${this.getTablePrefix()}_p${blockFrom}_${blockTo}`;
-      const existed = await this.partitionRepo.hotPartitionExists(name);
-      await this.partitionRepo.createHotPartition(name, blockFrom, blockTo);
-      if (!existed) {
-        logger.info({ partition: name }, '已确保热分区存在');
+      while (upper <= blockNumber) {
+        const blockFrom = upper;
+        const blockTo = upper + range;
+        const name = `${this.getTablePrefix()}_p${blockFrom}_${blockTo}`;
+        const existed = await this.partitionRepo.hotPartitionExists(name);
+        await this.partitionRepo.createHotPartition(name, blockFrom, blockTo);
+        if (!existed) {
+          logger.info({ partition: name }, '已确保热分区存在');
+        }
+        upper = blockTo;
       }
-      upper = blockTo;
+    } finally {
+      releaseSem();
     }
   }
 
