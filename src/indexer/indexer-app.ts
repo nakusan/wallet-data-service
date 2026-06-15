@@ -256,7 +256,11 @@ export class IndexerApp {
   }
 
   private async runReorgScanTick(): Promise<void> {
-    await this.erc20ReorgService?.scanAndRepair();
-    await this.nftReorgService?.scanAndRepair();
+    try {
+      await this.erc20ReorgService?.scanAndRepair();
+      await this.nftReorgService?.scanAndRepair();
+    } catch (err) {
+      logger.error({ err }, '定时 reorg 扫描失败');
+    }
   }
 }

@@ -127,33 +127,37 @@ export class NftLiveWatcher {
   }
 
   private async runReconnectFlow(contracts: MonitoredContract[]): Promise<void> {
-    if (!this.shouldRun) return;
-    this.state = LiveState.RECONNECTING;
-    this.reconnectAttempt += 1;
-    this.stopWatching();
-    await this.writeCoordinator.drain();
-    try { 
-      await this.onMiniBackfill(); 
-    } catch (err) { 
-      logger.error({ err }, 'NFT mini-backfill 失败'); 
+    try {
+      if (!this.shouldRun) return;
+      this.state = LiveState.RECONNECTING;
+      this.reconnectAttempt += 1;
+      this.stopWatching();
+      await this.writeCoordinator.drain();
+      try {
+        await this.onMiniBackfill();
+      } catch (err) {
+        logger.error({ err }, 'NFT mini-backfill 失败');
+      }
+      if (!this.shouldRun) {
+        this.state = LiveState.STOPPED;
+        return;
+      }
+      if (this.reconnectAttempt > 1) {
+        await sleep(Math.min(RECONNECT_MAX_BACKOFF_MS, 1000 * 2 ** (this.reconnectAttempt - 2)));
+      }
+      if (!this.shouldRun) {
+        this.state = LiveState.STOPPED;
+        return;
+      }
+      const safeLatest = await getSafeBlockNumber(this.wsClient, this.env.CONFIRMATION_DEPTH);
+      const resumeFrom = safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) > 0n
+        ? safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) : 0n;
+      this.state = LiveState.WATCHING;
+      this.reconnectAttempt = 0;
+      this.subscribeAll(contracts, resumeFrom);
+    } catch (err) {
+      logger.error({ err }, 'NFT WebSocket 重连流程失败');
     }
-    if (!this.shouldRun) { 
-      this.state = LiveState.STOPPED; 
-      return; 
-    }
-    if (this.reconnectAttempt > 1) {
-      await sleep(Math.min(RECONNECT_MAX_BACKOFF_MS, 1000 * 2 ** (this.reconnectAttempt - 2)));
-    }
-    if (!this.shouldRun) { 
-      this.state = LiveState.STOPPED; 
-      return; 
-    }
-    const safeLatest = await getSafeBlockNumber(this.wsClient, this.env.CONFIRMATION_DEPTH);
-    const resumeFrom = safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) > 0n
-      ? safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) : 0n;
-    this.state = LiveState.WATCHING;
-    this.reconnectAttempt = 0;
-    this.subscribeAll(contracts, resumeFrom);
   }
 
   private async handleLogs(contract: MonitoredContract, logs: RawNftLog[]): Promise<void> {
