@@ -1,4 +1,5 @@
 -- NFT 转账事件热层
+-- 预建分区覆盖主网当前高度附近；原型请从链头附近起扫（见 INDEXER_START_LOOKBACK_BLOCKS）
 -- ERC721 Transfer(from, to, tokenId) 和 ERC1155 TransferSingle/TransferBatch 统一存储
 -- ERC721: amount=1; ERC1155: amount=实际数量; TransferBatch 展开为多行（batch_index 区分）
 CREATE TABLE IF NOT EXISTS nft_transfers (

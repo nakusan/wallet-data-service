@@ -175,18 +175,20 @@ pnpm migrate
 
 ### 注册监控合约
 
-```sql
--- 添加 ERC20 合约
-INSERT INTO monitored_contracts (chain_id, token_type, symbol, address, decimals, start_block)
-VALUES (1, 'ERC20', 'USDC', '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', 6, 21000000);
+> **原型限制**：不支持从创世块或深层历史全量回填。`start_block` 推荐设为 `NULL`（从安全块高前 `INDEXER_START_LOOKBACK_BLOCKS` 块起扫，默认 100），或设为接近当前链头的块高，且不低于 migration 预建热分区的下界（`002`/`008` 当前为 `20_000_000`）。过低会被索引器自动钳制并打 warn 日志。
 
--- 添加 ERC721 合约
+```sql
+-- 添加 ERC20 合约（显式指定接近链头的块高）
 INSERT INTO monitored_contracts (chain_id, token_type, symbol, address, decimals, start_block)
-VALUES (1, 'ERC721', 'BAYC', '0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d', NULL, 12000000);
+VALUES (1, 'ERC20', 'USDC', '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48', 6, 21500000);
+
+-- 添加 ERC721 合约（推荐：NULL = 从链头附近自动起扫）
+INSERT INTO monitored_contracts (chain_id, token_type, symbol, address, decimals, start_block)
+VALUES (1, 'ERC721', 'BAYC', '0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d', NULL, NULL);
 
 -- 添加 ERC1155 合约
 INSERT INTO monitored_contracts (chain_id, token_type, symbol, address, decimals, start_block)
-VALUES (1, 'ERC1155', 'OpenSea Shared', '0x495f947276749ce646f68ac8c248420045cb7b5e', NULL, 12000000);
+VALUES (1, 'ERC1155', 'OpenSea Shared', '0x495f947276749ce646f68ac8c248420045cb7b5e', NULL, NULL);
 ```
 
 ### 创建 API Key
@@ -345,12 +347,12 @@ GET /v1/address/:addr/transactions?chainId=1&token=0x...&limit=20&cursor=xxx
   ],
   "nextCursor": "eyJibG9ja051bWJlciI6...",
   "hasMore": true,
-  "indexedSinceBlock": "12000000",
+  "indexedSinceBlock": "21500000",
   "disclaimer": "Balances and transfers reflect indexed activity since indexedSinceBlock only; may not include full on-chain history before that block."
 }
 ```
 
-> **索引窗口**：`indexedSinceBlock` 来自 `monitored_contracts.start_block`（指定 `token` 时用该合约；未指定时用活跃 ERC20 最小值）。仅包含该块之后的 indexed transfer。
+> **索引窗口**：`indexedSinceBlock` 来自 `monitored_contracts.start_block`（指定 `token` 时用该合约；未指定时用活跃 ERC20 最小值）。原型仅从链头附近起索引，**非**链上全量历史。
 
 > **分页机制**：Keyset Pagination（`block_number, log_index` 组合游标），无 OFFSET，性能恒定，适合大数据量分页。
 
@@ -380,12 +382,12 @@ GET /v1/tokens/:contract/holders?chainId=1&limit=20
     }
   ],
   "total": 20,
-  "indexedSinceBlock": "12000000",
+  "indexedSinceBlock": "21500000",
   "disclaimer": "Balances and transfers reflect indexed activity since indexedSinceBlock only; may not include full on-chain history before that block."
 }
 ```
 
-> **索引窗口**：排名基于 `token_balances` 物化快照，自 `indexedSinceBlock`（`monitored_contracts.start_block`）起累积；**非**链上全量 Top Holders。
+> **索引窗口**：排名基于 `token_balances` 物化快照，自 `indexedSinceBlock`（`monitored_contracts.start_block`）起累积；原型仅从链头附近起索引，**非**链上全量 Top Holders。
 
 > **缓存**：Redis TTL 60s
 
@@ -418,6 +420,7 @@ GET /v1/health
 | `CONFIRMATION_DEPTH` | — | `12` | 最终确认深度（块数） |
 | `BACKFILL_MAX_BLOCK_RANGE` | — | `2000` | 单次回填最大块范围 |
 | `BACKFILL_OVERLAP_BLOCKS` | — | `2` | 重连后回填重叠块数，防漏块 |
+| `INDEXER_START_LOOKBACK_BLOCKS` | — | `100` | 无 checkpoint 时相对安全块高的最大回看块数；`start_block` 为 NULL 或过低时的下界 |
 | `HOT_RETAIN_BLOCKS` | — | `648000` | 热层保留块数（约 90 天） |
 | `PARTITION_BLOCK_RANGE` | — | `500000` | 分区块范围宽度 |
 | `PARTITION_ENSURE_INTERVAL_MS` | — | `300000` | 预创建分区定时间隔（ms） |

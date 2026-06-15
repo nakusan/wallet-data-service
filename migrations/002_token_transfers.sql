@@ -1,4 +1,5 @@
 -- ERC20 转账事件热层（分区表）
+-- 预建分区覆盖主网当前高度附近；更低区块需后续扩展分区策略，原型请从链头附近起扫（见 INDEXER_START_LOOKBACK_BLOCKS）
 -- status: indexed=有效数据；reorged=重组作废（查询需过滤 indexed）
 CREATE TABLE IF NOT EXISTS token_transfers (
   chain_id         INTEGER NOT NULL,

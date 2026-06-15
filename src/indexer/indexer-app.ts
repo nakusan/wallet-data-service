@@ -24,6 +24,7 @@ import { NftLiveWatcher } from './nft/live-watcher.js';
 import type { NftTransferRecord, TransferRecord } from './domain/types.js';
 import { logger } from '../infrastructure/logger/logger.js';
 import type { WriteSemaphore } from '../infrastructure/db/write-semaphore.js';
+import { resolveStartBlock } from './util/resolve-start-block.js';
 
 export class IndexerApp {
   private erc20LiveWatcher: Erc20LiveWatcher | null = null;
@@ -42,6 +43,9 @@ export class IndexerApp {
 
   private readonly nftTransferRepo: NftTransferRepo;
   private readonly nftPartitionService: PartitionService;
+
+  /** 热层 migration 预建分区下界；用于 start_block 钳制（分区仅向上扩展） */
+  private hotPartitionMinBlock: bigint | null = null;
 
   constructor(
     private readonly pool: Pool,
@@ -75,6 +79,8 @@ export class IndexerApp {
     await this.updateFinalizedBlock();
 
     const safeLatest = await getSafeBlockNumber(this.chain.http, this.env.CONFIRMATION_DEPTH);
+    this.hotPartitionMinBlock = await new PartitionRepo(this.pool, 'token_transfers')
+      .getMinHotPartitionLowerBound();
     await Promise.all([
       this.erc20PartitionService.ensureThroughWithBuffer(safeLatest),
       this.nftPartitionService.ensureThroughWithBuffer(safeLatest),
@@ -179,9 +185,14 @@ export class IndexerApp {
     );
 
     for (const contract of contracts) {
-      const stored = await this.checkpointRepo.get(contract.chainId, contract.address, 'erc20');
-      const start = stored != null ? stored + 1n
-        : contract.startBlock ?? (safeLatest - 100n > 0n ? safeLatest - 100n : 0n);
+      const checkpoint = await this.checkpointRepo.get(contract.chainId, contract.address, 'erc20');
+      const start = resolveStartBlock({
+        contract,
+        checkpoint,
+        safeLatest,
+        lookbackBlocks: BigInt(this.env.INDEXER_START_LOOKBACK_BLOCKS),
+        hotPartitionMinBlock: this.hotPartitionMinBlock,
+      });
       if (start <= safeLatest) await backfill.fillSegmented(contract, start, safeLatest);
     }
 
@@ -192,9 +203,15 @@ export class IndexerApp {
       this.env, this.chain.ws, writeCoordinator, persistService, coordinator,
       async () => {
         for (const contract of contracts) {
-          const last = await this.checkpointRepo.get(contract.chainId, contract.address, 'erc20');
-          const from = last != null ? last + 1n : contract.startBlock ?? 0n;
+          const checkpoint = await this.checkpointRepo.get(contract.chainId, contract.address, 'erc20');
           const latest = await getSafeBlockNumber(this.chain.http, this.env.CONFIRMATION_DEPTH);
+          const from = resolveStartBlock({
+            contract,
+            checkpoint,
+            safeLatest: latest,
+            lookbackBlocks: BigInt(this.env.INDEXER_START_LOOKBACK_BLOCKS),
+            hotPartitionMinBlock: this.hotPartitionMinBlock,
+          });
           if (from <= latest) await backfill.fillSegmented(contract, from, latest);
         }
       },
@@ -265,9 +282,14 @@ export class IndexerApp {
     );
 
     for (const contract of contracts) {
-      const stored = await this.checkpointRepo.get(contract.chainId, contract.address, 'nft');
-      const start = stored != null ? stored + 1n
-        : contract.startBlock ?? (safeLatest - 100n > 0n ? safeLatest - 100n : 0n);
+      const checkpoint = await this.checkpointRepo.get(contract.chainId, contract.address, 'nft');
+      const start = resolveStartBlock({
+        contract,
+        checkpoint,
+        safeLatest,
+        lookbackBlocks: BigInt(this.env.INDEXER_START_LOOKBACK_BLOCKS),
+        hotPartitionMinBlock: this.hotPartitionMinBlock,
+      });
       if (start <= safeLatest) await backfill.fillSegmented(contract, start, safeLatest);
     }
 
@@ -278,9 +300,15 @@ export class IndexerApp {
       this.env, this.chain.ws, writeCoordinator, persistService, coordinator,
       async () => {
         for (const contract of contracts) {
-          const last = await this.checkpointRepo.get(contract.chainId, contract.address, 'nft');
-          const from = last != null ? last + 1n : contract.startBlock ?? 0n;
+          const checkpoint = await this.checkpointRepo.get(contract.chainId, contract.address, 'nft');
           const latest = await getSafeBlockNumber(this.chain.http, this.env.CONFIRMATION_DEPTH);
+          const from = resolveStartBlock({
+            contract,
+            checkpoint,
+            safeLatest: latest,
+            lookbackBlocks: BigInt(this.env.INDEXER_START_LOOKBACK_BLOCKS),
+            hotPartitionMinBlock: this.hotPartitionMinBlock,
+          });
           if (from <= latest) await backfill.fillSegmented(contract, from, latest);
         }
       },
