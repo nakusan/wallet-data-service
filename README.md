@@ -89,7 +89,7 @@
 |------|------|
 | `token_balances` | ERC20 余额物化快照，由 BalanceSyncWorker 维护 |
 | `nft_holdings` | NFT 持有快照，由 NftHoldingSyncWorker 维护 |
-| `balance_sync_state` | 物化水位线（按合约 × sync_type，支持进程重启续跑与运行期新增合约 catch-up） |
+| `balance_sync_state` | 物化水位线（按合约 × sync_type，支持进程重启续跑；运行期新增合约可自动 catch-up 物化，但事件索引需重启 indexer，见下方「注册监控合约」） |
 | `api_keys` | API Key 管理，`key_hash = SHA-256(raw_key)`，明文不落库 |
 | `request_audit` | 预留表（暂未启用） |
 
@@ -176,6 +176,8 @@ pnpm migrate
 ### 注册监控合约
 
 > **原型限制**：不支持从创世块或深层历史全量回填。`start_block` 推荐设为 `NULL`（从安全块高前 `INDEXER_START_LOOKBACK_BLOCKS` 块起扫，默认 100），或设为接近当前链头的块高，且不低于 migration 预建热分区的下界（`002`/`008` 当前为 `20_000_000`）。过低会被索引器自动钳制并打 warn 日志。
+
+> **运行期变更需重启 indexer**：`IndexerApp` 在启动时一次性加载活跃合约列表并建立 WebSocket 订阅（`LiveWatcher`）。运行中向 `monitored_contracts` **新增**合约，或将合约 **停用**（`is_active = false`）后，**必须重启进程**（`pnpm dev` / `pnpm start`）事件索引才会生效。`BalanceSyncWorker` / `NftHoldingSyncWorker` 会在运行中自动发现新合约并 catch-up 物化层，但 `token_transfers` / `nft_transfers` 不会自动订阅新合约。若启动时某类型（ERC20 / NFT）无任何活跃合约，后续首次 INSERT 该类型同样需要重启。
 
 ```sql
 -- 添加 ERC20 合约（显式指定接近链头的块高）
