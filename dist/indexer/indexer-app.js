@@ -16,6 +16,7 @@ import { NftTransferRepo } from './nft/transfer-repo.js';
 import { NftBackfillService } from './nft/backfill-service.js';
 import { NftLiveWatcher } from './nft/live-watcher.js';
 import { logger } from '../infrastructure/logger/logger.js';
+import { resolveStartBlock } from './util/resolve-start-block.js';
 export class IndexerApp {
     pool;
     env;
@@ -34,6 +35,8 @@ export class IndexerApp {
     erc20PartitionService;
     nftTransferRepo;
     nftPartitionService;
+    /** 热层 migration 预建分区下界；用于 start_block 钳制（分区仅向上扩展） */
+    hotPartitionMinBlock = null;
     constructor(pool, env, chain, writeSemaphore) {
         this.pool = pool;
         this.env = env;
@@ -53,6 +56,8 @@ export class IndexerApp {
         await this.chainStateRepo.syncFromContractMinOnPool(this.env.CHAIN_ID);
         await this.updateFinalizedBlock();
         const safeLatest = await getSafeBlockNumber(this.chain.http, this.env.CONFIRMATION_DEPTH);
+        this.hotPartitionMinBlock = await new PartitionRepo(this.pool, 'token_transfers')
+            .getMinHotPartitionLowerBound();
         await Promise.all([
             this.erc20PartitionService.ensureThroughWithBuffer(safeLatest),
             this.nftPartitionService.ensureThroughWithBuffer(safeLatest),
@@ -114,9 +119,14 @@ export class IndexerApp {
         const contracts = this.erc20Contracts;
         const persistService = new FinalizedPersistService(this.pool, this.env, this.chain.http, this.erc20TransferRepo, this.checkpointRepo, this.blockAnchorRepo, this.chainStateRepo, this.erc20PartitionService, 'erc20', this.writeSemaphore);
         for (const contract of contracts) {
-            const stored = await this.checkpointRepo.get(contract.chainId, contract.address, 'erc20');
-            const start = stored != null ? stored + 1n
-                : contract.startBlock ?? (safeLatest - 100n > 0n ? safeLatest - 100n : 0n);
+            const checkpoint = await this.checkpointRepo.get(contract.chainId, contract.address, 'erc20');
+            const start = resolveStartBlock({
+                contract,
+                checkpoint,
+                safeLatest,
+                lookbackBlocks: BigInt(this.env.INDEXER_START_LOOKBACK_BLOCKS),
+                hotPartitionMinBlock: this.hotPartitionMinBlock,
+            });
             if (start <= safeLatest)
                 await backfill.fillSegmented(contract, start, safeLatest);
         }
@@ -124,9 +134,15 @@ export class IndexerApp {
             ? safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) : 0n;
         const liveWatcher = new Erc20LiveWatcher(this.env, this.chain.ws, writeCoordinator, persistService, coordinator, async () => {
             for (const contract of contracts) {
-                const last = await this.checkpointRepo.get(contract.chainId, contract.address, 'erc20');
-                const from = last != null ? last + 1n : contract.startBlock ?? 0n;
+                const checkpoint = await this.checkpointRepo.get(contract.chainId, contract.address, 'erc20');
                 const latest = await getSafeBlockNumber(this.chain.http, this.env.CONFIRMATION_DEPTH);
+                const from = resolveStartBlock({
+                    contract,
+                    checkpoint,
+                    safeLatest: latest,
+                    lookbackBlocks: BigInt(this.env.INDEXER_START_LOOKBACK_BLOCKS),
+                    hotPartitionMinBlock: this.hotPartitionMinBlock,
+                });
                 if (from <= latest)
                     await backfill.fillSegmented(contract, from, latest);
             }
@@ -174,9 +190,14 @@ export class IndexerApp {
         const contracts = this.nftContracts;
         const persistService = new FinalizedPersistService(this.pool, this.env, this.chain.http, this.nftTransferRepo, this.checkpointRepo, this.blockAnchorRepo, this.chainStateRepo, this.nftPartitionService, 'nft', this.writeSemaphore);
         for (const contract of contracts) {
-            const stored = await this.checkpointRepo.get(contract.chainId, contract.address, 'nft');
-            const start = stored != null ? stored + 1n
-                : contract.startBlock ?? (safeLatest - 100n > 0n ? safeLatest - 100n : 0n);
+            const checkpoint = await this.checkpointRepo.get(contract.chainId, contract.address, 'nft');
+            const start = resolveStartBlock({
+                contract,
+                checkpoint,
+                safeLatest,
+                lookbackBlocks: BigInt(this.env.INDEXER_START_LOOKBACK_BLOCKS),
+                hotPartitionMinBlock: this.hotPartitionMinBlock,
+            });
             if (start <= safeLatest)
                 await backfill.fillSegmented(contract, start, safeLatest);
         }
@@ -184,9 +205,15 @@ export class IndexerApp {
             ? safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) : 0n;
         const liveWatcher = new NftLiveWatcher(this.env, this.chain.ws, writeCoordinator, persistService, coordinator, async () => {
             for (const contract of contracts) {
-                const last = await this.checkpointRepo.get(contract.chainId, contract.address, 'nft');
-                const from = last != null ? last + 1n : contract.startBlock ?? 0n;
+                const checkpoint = await this.checkpointRepo.get(contract.chainId, contract.address, 'nft');
                 const latest = await getSafeBlockNumber(this.chain.http, this.env.CONFIRMATION_DEPTH);
+                const from = resolveStartBlock({
+                    contract,
+                    checkpoint,
+                    safeLatest: latest,
+                    lookbackBlocks: BigInt(this.env.INDEXER_START_LOOKBACK_BLOCKS),
+                    hotPartitionMinBlock: this.hotPartitionMinBlock,
+                });
                 if (from <= latest)
                     await backfill.fillSegmented(contract, from, latest);
             }

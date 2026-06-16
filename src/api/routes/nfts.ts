@@ -4,18 +4,22 @@ import type Redis from 'ioredis';
 import { authMiddleware } from '../middleware/auth.js';
 import type { BalanceService } from '../../wallet/service/balance-service.js';
 import { CacheService, CacheKeys } from '../../infrastructure/cache/redis-client.js';
-
-const querySchema = z.object({
-  chainId: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-  offset: z.coerce.number().int().min(0).default(0),
-});
+import { assertChainId } from '../util/assert-chain-id.js';
 
 const addrSchema = z.string().regex(/^0x[0-9a-fA-F]{40}$/);
 
-export function nftsRouter(balanceService: BalanceService, redis: Redis): Router {
+export function nftsRouter(
+  balanceService: BalanceService,
+  redis: Redis,
+  configuredChainId: number,
+): Router {
   const router = Router();
   const cache = new CacheService(redis);
+  const querySchema = z.object({
+    chainId: z.coerce.number().int().positive().default(configuredChainId),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    offset: z.coerce.number().int().min(0).default(0),
+  });
 
   router.get('/address/:addr/nfts',
     authMiddleware(['read:balance'], redis),
@@ -23,6 +27,8 @@ export function nftsRouter(balanceService: BalanceService, redis: Redis): Router
       try {
         const addr = addrSchema.parse(req.params.addr);
         const { chainId, limit, offset } = querySchema.parse(req.query);
+        assertChainId(chainId, configuredChainId);
+
         const cacheKey = `${CacheKeys.nftHoldings(chainId, addr)}:${offset}:${limit}`;
 
         const result = await cache.getOrSet(cacheKey, 60, () =>

@@ -35,8 +35,10 @@ export class ChainReorgCoordinator {
             module.liveWatcher = watcher;
         }
     }
-    async onReorgDetected(error) {
-        await this.handleReorg(error.commonAncestor);
+    onReorgDetected(error) {
+        queueMicrotask(() => {
+            void this.handleReorg(error.commonAncestor);
+        });
     }
     async scanAndRepair() {
         if (this.handling)

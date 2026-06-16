@@ -25,6 +25,13 @@ async function main() {
   const redis = getRedis();
   const chain = createChainClients(env);
 
+  const rpcChainId = await chain.http.getChainId();
+  if (rpcChainId !== env.CHAIN_ID) {
+    throw new Error(
+      `CHAIN_ID=${env.CHAIN_ID} 与 RPC eth_chainId=${rpcChainId} 不一致，请检查配置`,
+    );
+  }
+
   const indexerApp = new IndexerApp(workerPool, env, chain, writeSemaphore);
 
   const balanceSyncWorker = new BalanceSyncWorker(
@@ -88,7 +95,7 @@ async function main() {
   balanceSyncWorker.start();
   nftSyncWorker.start();
 
-  logger.info('wallet-data-service 已完全启动');
+  logger.info({ chainId: env.CHAIN_ID }, 'wallet-data-service 已完全启动');
 }
 
 main().catch((err) => {

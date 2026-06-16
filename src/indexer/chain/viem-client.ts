@@ -1,6 +1,6 @@
 import { createPublicClient, http, webSocket, type PublicClient } from 'viem';
-import { mainnet } from 'viem/chains';
 import type { Env } from '../../config/env.js';
+import { resolveChain } from './resolve-chain.js';
 
 export interface ChainClients {
   http: PublicClient;
@@ -8,7 +8,7 @@ export interface ChainClients {
 }
 
 export function createChainClients(env: Env): ChainClients {
-  const chain = mainnet;
+  const chain = resolveChain(env.CHAIN_ID);
   return {
     http: createPublicClient({ chain, transport: http(env.RPC_HTTP_URL) }),
     ws: createPublicClient({ chain, transport: webSocket(env.RPC_WS_URL) }),

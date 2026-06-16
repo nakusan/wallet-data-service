@@ -1,5 +1,6 @@
 import { ZodError } from 'zod';
 import { logger } from '../../infrastructure/logger/logger.js';
+import { UnsupportedChainError } from '../util/assert-chain-id.js';
 function isPoolOrStatementTimeout(err) {
     if (!(err instanceof Error))
         return false;
@@ -16,6 +17,14 @@ export function errorHandler(err, req, res, _next) {
         res.status(400).json({
             error: 'validation_error',
             details: err.flatten().fieldErrors,
+        });
+        return;
+    }
+    if (err instanceof UnsupportedChainError) {
+        res.status(400).json({
+            error: err.code,
+            message: err.message,
+            configuredChainId: err.configured,
         });
         return;
     }

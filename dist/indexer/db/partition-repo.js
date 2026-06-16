@@ -46,6 +46,13 @@ export class PartitionRepo {
             return null;
         return parts[parts.length - 1].blockTo;
     }
+    /** 热层最老分区的 block_from（migration 预建下界）；无分区时返回 null */
+    async getMinHotPartitionLowerBound() {
+        const parts = await this.listHotPartitions();
+        if (parts.length === 0)
+            return null;
+        return parts[0].blockFrom;
+    }
     async hotPartitionExists(partitionName) {
         const { rows } = await this.pool.query(`SELECT 1 FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace

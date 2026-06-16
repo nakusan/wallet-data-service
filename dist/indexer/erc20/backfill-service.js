@@ -53,7 +53,7 @@ export class Erc20BackfillService {
         catch (error) {
             if (error instanceof ReorgDetectedError) {
                 logger.warn({ symbol: contract.symbol, forkBlock: error.forkBlock.toString() }, '回填检测到 reorg');
-                await this.reorgHandler.onReorgDetected(error);
+                this.reorgHandler.onReorgDetected(error);
                 return;
             }
             throw error;

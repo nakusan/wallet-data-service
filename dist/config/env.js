@@ -21,6 +21,8 @@ const envSchema = z.object({
     CONFIRMATION_DEPTH: z.coerce.number().int().nonnegative().default(12),
     BACKFILL_MAX_BLOCK_RANGE: z.coerce.number().int().positive().default(2000),
     BACKFILL_OVERLAP_BLOCKS: z.coerce.number().int().nonnegative().default(2),
+    /** 无 checkpoint 时相对安全块高的最大回看块数；start_block 为 NULL 或过低时以此为下界 */
+    INDEXER_START_LOOKBACK_BLOCKS: z.coerce.number().int().nonnegative().default(100),
     HOT_RETAIN_BLOCKS: z.coerce.number().int().positive().default(648000),
     PARTITION_BLOCK_RANGE: z.coerce.number().int().positive().default(500000),
     PARTITION_ENSURE_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),

@@ -94,9 +94,13 @@ export class Erc20LiveWatcher {
         this.unwatchFns = [];
     }
     scheduleReconnect(contracts) {
-        if (!this.shouldRun || this.reorgStopped || this.state === LiveState.RECONNECTING || this.reconnectPromise)
+        if (!this.shouldRun
+            || this.reorgStopped
+            || this.state === LiveState.RECONNECTING
+            || this.reconnectPromise)
             return;
-        this.reconnectPromise = this.runReconnectFlow(contracts).finally(() => {
+        this.reconnectPromise = this.runReconnectFlow(contracts)
+            .finally(() => {
             this.reconnectPromise = null;
         });
         void this.reconnectPromise;
@@ -159,7 +163,7 @@ export class Erc20LiveWatcher {
         }
         catch (error) {
             if (error instanceof ReorgDetectedError) {
-                await this.reorgHandler.onReorgDetected(error);
+                this.reorgHandler.onReorgDetected(error);
                 return;
             }
             throw error;

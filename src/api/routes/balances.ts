@@ -4,19 +4,20 @@ import type Redis from 'ioredis';
 import { authMiddleware } from '../middleware/auth.js';
 import type { BalanceService } from '../../wallet/service/balance-service.js';
 import { CacheService, CacheKeys } from '../../infrastructure/cache/redis-client.js';
-
-const querySchema = z.object({
-  chainId: z.coerce.number().int().positive().default(1),
-});
+import { assertChainId } from '../util/assert-chain-id.js';
 
 const addrSchema = z.string().regex(/^0x[0-9a-fA-F]{40}$/);
 
 export function balancesRouter(
   balanceService: BalanceService,
   redis: Redis,
+  configuredChainId: number,
 ): Router {
   const router = Router();
   const cache = new CacheService(redis);
+  const querySchema = z.object({
+    chainId: z.coerce.number().int().positive().default(configuredChainId),
+  });
 
   router.get('/address/:addr/balances',
     authMiddleware(['read:balance'], redis),
@@ -24,6 +25,8 @@ export function balancesRouter(
       try {
         const addr = addrSchema.parse(req.params.addr);
         const { chainId } = querySchema.parse(req.query);
+        assertChainId(chainId, configuredChainId);
+
         const cacheKey = CacheKeys.tokenBalances(chainId, addr);
 
         const result = await cache.getOrSet(cacheKey, 30, async () => {

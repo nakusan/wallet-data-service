@@ -194,7 +194,7 @@ export class NftLiveWatcher {
         }
         catch (error) {
             if (error instanceof ReorgDetectedError) {
-                await this.reorgHandler.onReorgDetected(error);
+                this.reorgHandler.onReorgDetected(error);
                 return;
             }
             throw error;

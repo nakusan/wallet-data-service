@@ -23,6 +23,10 @@ async function main() {
     const writeSemaphore = new WriteSemaphore(env.DB_MAX_CONCURRENT_WRITE_TX);
     const redis = getRedis();
     const chain = createChainClients(env);
+    const rpcChainId = await chain.http.getChainId();
+    if (rpcChainId !== env.CHAIN_ID) {
+        throw new Error(`CHAIN_ID=${env.CHAIN_ID} 与 RPC eth_chainId=${rpcChainId} 不一致，请检查配置`);
+    }
     const indexerApp = new IndexerApp(workerPool, env, chain, writeSemaphore);
     const balanceSyncWorker = new BalanceSyncWorker(workerPool, redis, env.CHAIN_ID, env.BALANCE_SYNC_INTERVAL_MS, writeSemaphore);
     const nftSyncWorker = new NftHoldingSyncWorker(workerPool, redis, env.CHAIN_ID, env.NFT_SYNC_INTERVAL_MS, writeSemaphore);
@@ -75,7 +79,7 @@ async function main() {
     await indexerApp.run();
     balanceSyncWorker.start();
     nftSyncWorker.start();
-    logger.info('wallet-data-service 已完全启动');
+    logger.info({ chainId: env.CHAIN_ID }, 'wallet-data-service 已完全启动');
 }
 main().catch((err) => {
     logger.error({ err }, '启动失败');

@@ -14,6 +14,7 @@ import { nftsRouter } from './routes/nfts.js';
 import { transactionsRouter } from './routes/transactions.js';
 import { holdersRouter } from './routes/holders.js';
 import { errorHandler } from './middleware/error-handler.js';
+import { resolveChain } from '../indexer/chain/resolve-chain.js';
 function parseCorsOrigins(raw) {
     if (!raw?.trim())
         return [];
@@ -61,14 +62,15 @@ export function buildExpressApp(pool, redis, httpClient, env) {
     });
     const cache = new CacheService(redis);
     const contractRepo = new ContractRepo(pool);
-    const balanceService = new BalanceService(pool, httpClient, cache, contractRepo, env.CHAIN_ID);
+    const chainMeta = resolveChain(env.CHAIN_ID);
+    const balanceService = new BalanceService(pool, httpClient, cache, contractRepo, env.CHAIN_ID, chainMeta.nativeCurrency.symbol);
     const txService = new TxHistoryService(pool, contractRepo);
     const holdersService = new HoldersService(pool, cache, contractRepo, env.CHAIN_ID);
     app.use('/v1/auth', authRouter(pool, redis));
-    app.use('/v1', balancesRouter(balanceService, redis));
-    app.use('/v1', nftsRouter(balanceService, redis));
-    app.use('/v1', transactionsRouter(txService, redis));
-    app.use('/v1', holdersRouter(holdersService, redis));
+    app.use('/v1', balancesRouter(balanceService, redis, env.CHAIN_ID));
+    app.use('/v1', nftsRouter(balanceService, redis, env.CHAIN_ID));
+    app.use('/v1', transactionsRouter(txService, redis, env.CHAIN_ID));
+    app.use('/v1', holdersRouter(holdersService, redis, env.CHAIN_ID));
     app.use(errorHandler);
     return app;
 }
