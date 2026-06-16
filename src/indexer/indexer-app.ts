@@ -15,6 +15,7 @@ import {
   createChainReorgCoordinator,
 } from './service/chain-reorg-coordinator.js';
 import { FinalizedPersistService } from './service/finalized-persist-service.js';
+import { ChainAnchorService } from './service/chain-anchor-service.js';
 import { Erc20TransferRepo } from './erc20/transfer-repo.js';
 import { Erc20BackfillService } from './erc20/backfill-service.js';
 import { Erc20LiveWatcher } from './erc20/live-watcher.js';
@@ -39,6 +40,7 @@ export class IndexerApp {
   private readonly checkpointRepo: CheckpointRepo;
   private readonly chainStateRepo: ChainStateRepo;
   private readonly blockAnchorRepo: BlockAnchorRepo;
+  private readonly chainAnchorService: ChainAnchorService;
 
   private readonly erc20TransferRepo: Erc20TransferRepo;
   private readonly erc20PartitionService: PartitionService;
@@ -59,6 +61,9 @@ export class IndexerApp {
     this.checkpointRepo = new CheckpointRepo(pool);
     this.chainStateRepo = new ChainStateRepo(pool);
     this.blockAnchorRepo = new BlockAnchorRepo(pool);
+    this.chainAnchorService = new ChainAnchorService(
+      pool, env, chain.http, this.blockAnchorRepo, writeSemaphore,
+    );
 
     this.erc20TransferRepo = new Erc20TransferRepo(pool);
     this.erc20PartitionService = new PartitionService(
@@ -90,7 +95,7 @@ export class IndexerApp {
 
     const coordinator = createChainReorgCoordinator(
       this.pool, this.env, this.chain.http,
-      this.chainStateRepo, this.blockAnchorRepo,
+      this.chainStateRepo, this.blockAnchorRepo, this.chainAnchorService,
       this.checkpointRepo, this.writeSemaphore,
     );
     this.chainReorgCoordinator = coordinator;
@@ -160,11 +165,17 @@ export class IndexerApp {
     );
 
     const backfill = new Erc20BackfillService(
-      this.env, 
-      this.chain.http, 
-      writeCoordinator, 
-      persistService, 
+      this.env,
+      this.chain.http,
+      writeCoordinator,
+      persistService,
       coordinator,
+      this.chainAnchorService,
+      this.pool,
+      this.checkpointRepo,
+      this.chainStateRepo,
+      this.blockAnchorRepo,
+      this.writeSemaphore,
     );
     this.erc20Backfill = backfill;
 
@@ -258,6 +269,12 @@ export class IndexerApp {
 
     const backfill = new NftBackfillService(
       this.env, this.chain.http, writeCoordinator, persistService, coordinator, this.nftTransferRepo,
+      this.chainAnchorService,
+      this.pool,
+      this.checkpointRepo,
+      this.chainStateRepo,
+      this.blockAnchorRepo,
+      this.writeSemaphore,
     );
     this.nftBackfill = backfill;
 

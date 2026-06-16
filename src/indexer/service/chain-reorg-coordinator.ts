@@ -9,6 +9,7 @@ import type { ChainStateRepo } from '../db/chain-state-repo.js';
 import type { BlockAnchorRepo } from '../db/block-anchor-repo.js';
 import type { IndexerType } from '../domain/types.js';
 import type { AncestorFinder } from './finalized-persist-service.js';
+import type { ChainAnchorService } from './chain-anchor-service.js';
 import type { IndexerReorgModule, LiveWatcherReorgControl } from './reorg-service.js';
 import { ReorgRepairExecutor } from './reorg-service.js';
 
@@ -31,6 +32,7 @@ export class ChainReorgCoordinator implements ReorgHandler {
     private readonly httpClient: PublicClient,
     private readonly chainStateRepo: ChainStateRepo,
     private readonly blockAnchorRepo: BlockAnchorRepo,
+    private readonly chainAnchorService: ChainAnchorService,
     private readonly repairExecutor: ReorgRepairExecutor,
   ) {
     this.blockReader = new BlockReader(httpClient);
@@ -127,6 +129,7 @@ export class ChainReorgCoordinator implements ReorgHandler {
     const from = commonAncestor + 1n;
     if (from > safeUpper) return;
 
+    await this.chainAnchorService.ensureSegmented(this.env.CHAIN_ID, from, safeUpper);
     await Promise.all(
       contracts.map((contract) => module.backfill.fillSegmented(contract, from, safeUpper)),
     );
@@ -139,11 +142,14 @@ export function createChainReorgCoordinator(
   httpClient: PublicClient,
   chainStateRepo: ChainStateRepo,
   blockAnchorRepo: BlockAnchorRepo,
+  chainAnchorService: ChainAnchorService,
   checkpointRepo: import('../db/checkpoint-repo.js').CheckpointRepo,
   writeSemaphore: import('../../infrastructure/db/write-semaphore.js').WriteSemaphore,
 ): ChainReorgCoordinator {
   const repairExecutor = new ReorgRepairExecutor(
     pool, env, httpClient, checkpointRepo, chainStateRepo, blockAnchorRepo, writeSemaphore,
   );
-  return new ChainReorgCoordinator(env, httpClient, chainStateRepo, blockAnchorRepo, repairExecutor);
+  return new ChainReorgCoordinator(
+    env, httpClient, chainStateRepo, blockAnchorRepo, chainAnchorService, repairExecutor,
+  );
 }

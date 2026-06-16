@@ -10,16 +10,18 @@ export class ChainReorgCoordinator {
     httpClient;
     chainStateRepo;
     blockAnchorRepo;
+    chainAnchorService;
     repairExecutor;
     blockReader;
     modules = new Map();
     ancestorFinder = null;
     handling = false;
-    constructor(env, httpClient, chainStateRepo, blockAnchorRepo, repairExecutor) {
+    constructor(env, httpClient, chainStateRepo, blockAnchorRepo, chainAnchorService, repairExecutor) {
         this.env = env;
         this.httpClient = httpClient;
         this.chainStateRepo = chainStateRepo;
         this.blockAnchorRepo = blockAnchorRepo;
+        this.chainAnchorService = chainAnchorService;
         this.repairExecutor = repairExecutor;
         this.blockReader = new BlockReader(httpClient);
     }
@@ -101,11 +103,12 @@ export class ChainReorgCoordinator {
         const from = commonAncestor + 1n;
         if (from > safeUpper)
             return;
+        await this.chainAnchorService.ensureSegmented(this.env.CHAIN_ID, from, safeUpper);
         await Promise.all(contracts.map((contract) => module.backfill.fillSegmented(contract, from, safeUpper)));
     }
 }
-export function createChainReorgCoordinator(pool, env, httpClient, chainStateRepo, blockAnchorRepo, checkpointRepo, writeSemaphore) {
+export function createChainReorgCoordinator(pool, env, httpClient, chainStateRepo, blockAnchorRepo, chainAnchorService, checkpointRepo, writeSemaphore) {
     const repairExecutor = new ReorgRepairExecutor(pool, env, httpClient, checkpointRepo, chainStateRepo, blockAnchorRepo, writeSemaphore);
-    return new ChainReorgCoordinator(env, httpClient, chainStateRepo, blockAnchorRepo, repairExecutor);
+    return new ChainReorgCoordinator(env, httpClient, chainStateRepo, blockAnchorRepo, chainAnchorService, repairExecutor);
 }
 //# sourceMappingURL=chain-reorg-coordinator.js.map

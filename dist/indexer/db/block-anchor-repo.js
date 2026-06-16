@@ -30,6 +30,21 @@ export class BlockAnchorRepo {
     async deleteAfter(client, chainId, afterBlock) {
         await client.query(`DELETE FROM indexer_block_anchors WHERE chain_id=$1 AND block_number>$2`, [chainId, afterBlock.toString()]);
     }
+    async listExistingBlockNumbersInRange(chainId, fromBlock, toBlock) {
+        if (fromBlock > toBlock)
+            return new Set();
+        const { rows } = await this.pool.query(`SELECT block_number FROM indexer_block_anchors
+       WHERE chain_id=$1 AND block_number >= $2 AND block_number <= $3`, [chainId, fromBlock.toString(), toBlock.toString()]);
+        return new Set(rows.map((r) => BigInt(r.block_number)));
+    }
+    async isRangeComplete(chainId, fromBlock, toBlock) {
+        if (fromBlock > toBlock)
+            return true;
+        const expected = toBlock - fromBlock + 1n;
+        const { rows } = await this.pool.query(`SELECT COUNT(*)::bigint AS cnt FROM indexer_block_anchors
+       WHERE chain_id=$1 AND block_number >= $2 AND block_number <= $3`, [chainId, fromBlock.toString(), toBlock.toString()]);
+        return BigInt(rows[0]?.cnt ?? 0) === expected;
+    }
     async getHashAt(client, chainId, blockNumber) {
         const { rows } = await client.query(`SELECT block_hash FROM indexer_block_anchors
        WHERE chain_id=$1 AND block_number=$2`, [chainId, blockNumber.toString()]);

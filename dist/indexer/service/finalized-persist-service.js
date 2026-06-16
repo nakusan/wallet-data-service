@@ -2,6 +2,7 @@ import { ReorgDetectedError } from '../domain/errors.js';
 import { BlockReader } from '../chain/block-reader.js';
 import { getSafeBlockNumber } from '../chain/viem-client.js';
 import { logger } from '../../infrastructure/logger/logger.js';
+import { prefetchBlockHeaders } from '../util/prefetch-block-headers.js';
 export class FinalizedPersistService {
     pool;
     env;
@@ -27,26 +28,20 @@ export class FinalizedPersistService {
         this.writeSemaphore = writeSemaphore;
         this.blockReader = new BlockReader(httpClient);
     }
-    async persistBatch(contract, records, batchMaxBlock, options = {}) {
+    async persistBatch(contract, records, batchMaxBlock) {
         const safeUpper = await getSafeBlockNumber(this.httpClient, this.env.CONFIRMATION_DEPTH);
         const effectiveMax = batchMaxBlock > safeUpper ? safeUpper : batchMaxBlock;
         const filtered = records.filter((r) => r.blockNumber <= safeUpper);
         const currentCheckpoint = await this.checkpointRepo.get(contract.chainId, contract.address, this.indexerType);
         await this.partitionService.ensureThrough(effectiveMax);
-        const inlineGapFill = !options.forceAdvance && this.shouldInlineGapFill(currentCheckpoint, effectiveMax);
-        const anchorBlocks = this.collectAnchorBlocks(options, filtered, currentCheckpoint, effectiveMax, inlineGapFill);
+        const inlineGapFill = this.shouldInlineGapFill(currentCheckpoint, effectiveMax);
+        const anchorBlocks = this.collectAnchorBlocks(filtered, currentCheckpoint, effectiveMax, inlineGapFill);
         const headerMap = await this.prefetchHeaders(anchorBlocks);
         const releaseSem = await this.writeSemaphore.acquire();
         const client = await this.pool.connect();
         try {
             await client.query('BEGIN');
-            if (options.forceAdvance) {
-                const anchorStart = options.anchorFromBlock ??
-                    (currentCheckpoint != null ? currentCheckpoint + 1n : effectiveMax);
-                const from = anchorStart > effectiveMax ? effectiveMax : anchorStart;
-                await this.writeAnchorsFromPrefetched(client, contract.chainId, from, effectiveMax, headerMap);
-            }
-            else if (inlineGapFill) {
+            if (inlineGapFill) {
                 const from = currentCheckpoint + 1n;
                 await this.writeAnchorsFromPrefetched(client, contract.chainId, from, effectiveMax, headerMap);
                 logger.debug({
@@ -68,7 +63,7 @@ export class FinalizedPersistService {
             const inserted = filtered.length > 0
                 ? await this.transferRepo.batchUpsert(client, filtered)
                 : 0;
-            const shouldAdvance = this.shouldAdvanceCheckpoint(options, currentCheckpoint, effectiveMax, inlineGapFill);
+            const shouldAdvance = this.shouldAdvanceCheckpoint(currentCheckpoint, effectiveMax, inlineGapFill);
             if (shouldAdvance) {
                 const hash = await this.blockAnchorRepo.getHashAt(client, contract.chainId, effectiveMax);
                 await this.checkpointRepo.set(client, contract.chainId, contract.address, this.indexerType, effectiveMax, hash);
@@ -89,19 +84,7 @@ export class FinalizedPersistService {
             releaseSem();
         }
     }
-    collectAnchorBlocks(options, filtered, currentCheckpoint, effectiveMax, inlineGapFill) {
-        if (options.forceAdvance) {
-            const anchorStart = options.anchorFromBlock ??
-                (currentCheckpoint != null ? currentCheckpoint + 1n : effectiveMax);
-            const from = anchorStart > effectiveMax ? effectiveMax : anchorStart;
-            if (from > effectiveMax)
-                return [];
-            const blocks = [];
-            for (let n = from; n <= effectiveMax; n++) {
-                blocks.push(n);
-            }
-            return blocks;
-        }
+    collectAnchorBlocks(filtered, currentCheckpoint, effectiveMax, inlineGapFill) {
         if (inlineGapFill && currentCheckpoint != null) {
             const blocks = [];
             for (let n = currentCheckpoint + 1n; n <= effectiveMax; n++) {
@@ -124,15 +107,9 @@ export class FinalizedPersistService {
         return gap > 1n && gap <= maxGap;
     }
     async prefetchHeaders(blockNumbers) {
-        const map = new Map();
-        for (const n of blockNumbers) {
-            map.set(n.toString(), await this.blockReader.getHeader(n));
-        }
-        return map;
+        return prefetchBlockHeaders(this.blockReader, blockNumbers, this.env.ANCHOR_PREFETCH_CONCURRENCY);
     }
-    shouldAdvanceCheckpoint(options, currentCheckpoint, effectiveMax, inlineGapFill) {
-        if (options.forceAdvance)
-            return true;
+    shouldAdvanceCheckpoint(currentCheckpoint, effectiveMax, inlineGapFill) {
         if (inlineGapFill)
             return true;
         if (currentCheckpoint == null)

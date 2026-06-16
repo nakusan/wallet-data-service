@@ -32,6 +32,8 @@ const envSchema = z.object({
     GAP_BACKFILL_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
     /** live 路径单次事务内联补洞的最大块数；更大 gap 交给定时 backfill */
     MAX_INLINE_GAP_BLOCKS: z.coerce.number().int().positive().default(500),
+    /** 链级 anchor 回填时 eth_getBlock 并发上限 */
+    ANCHOR_PREFETCH_CONCURRENCY: z.coerce.number().int().positive().default(32),
     ARCHIVE_REORG_SAFETY_MARGIN: z.coerce.number().int().nonnegative().default(128),
     BALANCE_SYNC_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
     NFT_SYNC_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),

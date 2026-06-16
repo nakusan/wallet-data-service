@@ -51,6 +51,31 @@ export class BlockAnchorRepo {
     );
   }
 
+  async listExistingBlockNumbersInRange(
+    chainId: number,
+    fromBlock: bigint,
+    toBlock: bigint,
+  ): Promise<Set<bigint>> {
+    if (fromBlock > toBlock) return new Set();
+    const { rows } = await this.pool.query<{ block_number: string }>(
+      `SELECT block_number FROM indexer_block_anchors
+       WHERE chain_id=$1 AND block_number >= $2 AND block_number <= $3`,
+      [chainId, fromBlock.toString(), toBlock.toString()],
+    );
+    return new Set(rows.map((r) => BigInt(r.block_number)));
+  }
+
+  async isRangeComplete(chainId: number, fromBlock: bigint, toBlock: bigint): Promise<boolean> {
+    if (fromBlock > toBlock) return true;
+    const expected = toBlock - fromBlock + 1n;
+    const { rows } = await this.pool.query<{ cnt: string }>(
+      `SELECT COUNT(*)::bigint AS cnt FROM indexer_block_anchors
+       WHERE chain_id=$1 AND block_number >= $2 AND block_number <= $3`,
+      [chainId, fromBlock.toString(), toBlock.toString()],
+    );
+    return BigInt(rows[0]?.cnt ?? 0) === expected;
+  }
+
   async getHashAt(
     client: Pool | PoolClient,
     chainId: number,
