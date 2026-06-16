@@ -1,10 +1,5 @@
+import { encodeCursor } from '../../api/util/cursor.js';
 import { INDEXED_DATA_DISCLAIMER } from './indexing-disclaimer.js';
-function encodeCursor(c) {
-    return Buffer.from(JSON.stringify(c)).toString('base64url');
-}
-function decodeCursor(s) {
-    return JSON.parse(Buffer.from(s, 'base64url').toString());
-}
 export class TxHistoryService {
     pool;
     contractRepo;
@@ -16,7 +11,7 @@ export class TxHistoryService {
         const addr = address.toLowerCase();
         const limit = Math.min(opts.limit ?? 20, 100);
         const token = opts.token?.toLowerCase() ?? null;
-        const cursor = opts.cursor ? decodeCursor(opts.cursor) : null;
+        const cursor = opts.cursor ?? null;
         const indexedSinceBlock = token != null
             ? await this.contractRepo.getStartBlock(chainId, token)
             : await this.contractRepo.getMinErc20StartBlock(chainId);

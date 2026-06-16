@@ -58,14 +58,14 @@ export class NftHoldingSyncWorker {
   }
 
   private async sync(): Promise<void> {
-    const { safeUpper, lagging } = await this.loadWorkQueue();
+    const lagging = await this.loadWorkQueue();
     if (lagging.length === 0) return;
 
     const affectedAddrs = new Set<string>();
     let syncedCount = 0;
 
     for (const item of lagging) {
-      const result = await this.syncOneContract(item, safeUpper);
+      const result = await this.syncOneContract(item);
       if (!result) continue;
       syncedCount += result.transferCount;
       for (const addr of result.affectedAddrs) affectedAddrs.add(addr);
@@ -79,27 +79,19 @@ export class NftHoldingSyncWorker {
     if (keys.length > 0) await this.redis.del(...keys);
   }
 
-  private async loadWorkQueue(): Promise<{ safeUpper: bigint; lagging: LaggingContract[] }> {
+  private async loadWorkQueue(): Promise<LaggingContract[]> {
     const client = await this.pool.connect();
     try {
-      const { rows: chainRows } = await client.query(
-        `SELECT LEAST(min_indexed_checkpoint, finalized_block) AS safe_upper
-         FROM indexer_chain_state WHERE chain_id=$1`,
-        [this.chainId],
+      return await this.syncStateRepo.pickLaggingNft(
+        client, this.chainId, MAX_CONTRACTS_PER_TICK,
       );
-      const safeUpper = BigInt(chainRows[0]?.safe_upper ?? 0);
-      const lagging = await this.syncStateRepo.pickLaggingNft(
-        client, this.chainId, safeUpper, MAX_CONTRACTS_PER_TICK,
-      );
-      return { safeUpper, lagging };
     } finally {
       client.release();
     }
   }
 
   private async syncOneContract(
-    { contractAddress, lastSynced }: LaggingContract,
-    safeUpper: bigint,
+    { contractAddress, lastSynced, safeUpper }: LaggingContract,
   ): Promise<{ transferCount: number; affectedAddrs: string[] } | null> {
     const fromBlock = lastSynced + 1n;
     if (fromBlock > safeUpper) return null;

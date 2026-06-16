@@ -48,13 +48,13 @@ export class BalanceSyncWorker {
   }
 
   private async sync(): Promise<void> {
-    const { safeUpper, lagging } = await this.loadWorkQueue();
+    const lagging = await this.loadWorkQueue();
     if (lagging.length === 0) return;
 
     const cacheRanges: Array<{ contractAddress: string; fromBlock: bigint; toBlock: bigint }> = [];
 
     for (const item of lagging) {
-      const range = await this.syncOneContract(item, safeUpper);
+      const range = await this.syncOneContract(item);
       if (range) cacheRanges.push(range);
     }
 
@@ -67,27 +67,19 @@ export class BalanceSyncWorker {
     }
   }
 
-  private async loadWorkQueue(): Promise<{ safeUpper: bigint; lagging: LaggingContract[] }> {
+  private async loadWorkQueue(): Promise<LaggingContract[]> {
     const client = await this.pool.connect();
     try {
-      const { rows: chainRows } = await client.query(
-        `SELECT LEAST(min_indexed_checkpoint, finalized_block) AS safe_upper
-         FROM indexer_chain_state WHERE chain_id=$1`,
-        [this.chainId],
+      return await this.syncStateRepo.pickLaggingErc20(
+        client, this.chainId, MAX_CONTRACTS_PER_TICK,
       );
-      const safeUpper = BigInt(chainRows[0]?.safe_upper ?? 0);
-      const lagging = await this.syncStateRepo.pickLaggingErc20(
-        client, this.chainId, safeUpper, MAX_CONTRACTS_PER_TICK,
-      );
-      return { safeUpper, lagging };
     } finally {
       client.release();
     }
   }
 
   private async syncOneContract(
-    { contractAddress, lastSynced }: LaggingContract,
-    safeUpper: bigint,
+    { contractAddress, lastSynced, safeUpper }: LaggingContract,
   ): Promise<{ contractAddress: string; fromBlock: bigint; toBlock: bigint } | null> {
     const fromBlock = lastSynced + 1n;
     if (fromBlock > safeUpper) return null;

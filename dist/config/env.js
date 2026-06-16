@@ -28,6 +28,10 @@ const envSchema = z.object({
     PARTITION_ENSURE_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
     REORG_SCAN_DEPTH: z.coerce.number().int().positive().default(128),
     REORG_SCAN_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+    /** 定时将各合约 checkpoint 追至安全块高（补空块 anchor） */
+    GAP_BACKFILL_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+    /** live 路径单次事务内联补洞的最大块数；更大 gap 交给定时 backfill */
+    MAX_INLINE_GAP_BLOCKS: z.coerce.number().int().positive().default(500),
     ARCHIVE_REORG_SAFETY_MARGIN: z.coerce.number().int().nonnegative().default(128),
     BALANCE_SYNC_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
     NFT_SYNC_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),

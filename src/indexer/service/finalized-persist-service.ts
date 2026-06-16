@@ -65,8 +65,11 @@ export class FinalizedPersistService<T extends { blockNumber: bigint }> {
 
     await this.partitionService.ensureThrough(effectiveMax);
 
+    const inlineGapFill =
+      !options.forceAdvance && this.shouldInlineGapFill(currentCheckpoint, effectiveMax);
+
     const anchorBlocks = this.collectAnchorBlocks(
-      options, filtered, currentCheckpoint, effectiveMax,
+      options, filtered, currentCheckpoint, effectiveMax, inlineGapFill,
     );
     const headerMap = await this.prefetchHeaders(anchorBlocks);
 
@@ -81,6 +84,17 @@ export class FinalizedPersistService<T extends { blockNumber: bigint }> {
           (currentCheckpoint != null ? currentCheckpoint + 1n : effectiveMax);
         const from = anchorStart > effectiveMax ? effectiveMax : anchorStart;
         await this.writeAnchorsFromPrefetched(client, contract.chainId, from, effectiveMax, headerMap);
+      } else if (inlineGapFill) {
+        const from = currentCheckpoint! + 1n;
+        await this.writeAnchorsFromPrefetched(client, contract.chainId, from, effectiveMax, headerMap);
+        logger.debug(
+          {
+            symbol: contract.symbol,
+            from: from.toString(),
+            to: effectiveMax.toString(),
+          },
+          'live 内联补洞 anchor 完成',
+        );
       } else if (filtered.length > 0) {
         const blocks = [...new Set(filtered.map((r) => r.blockNumber))].sort(
           (a, b) => (a < b ? -1 : a > b ? 1 : 0),
@@ -98,7 +112,9 @@ export class FinalizedPersistService<T extends { blockNumber: bigint }> {
         ? await this.transferRepo.batchUpsert(client, filtered)
         : 0;
 
-      const shouldAdvance = this.shouldAdvanceCheckpoint(options, currentCheckpoint, effectiveMax);
+      const shouldAdvance = this.shouldAdvanceCheckpoint(
+        options, currentCheckpoint, effectiveMax, inlineGapFill,
+      );
       if (shouldAdvance) {
         const hash = await this.blockAnchorRepo.getHashAt(client, contract.chainId, effectiveMax);
         await this.checkpointRepo.set(
@@ -130,6 +146,7 @@ export class FinalizedPersistService<T extends { blockNumber: bigint }> {
     filtered: T[],
     currentCheckpoint: bigint | null,
     effectiveMax: bigint,
+    inlineGapFill: boolean,
   ): bigint[] {
     if (options.forceAdvance) {
       const anchorStart =
@@ -143,8 +160,27 @@ export class FinalizedPersistService<T extends { blockNumber: bigint }> {
       }
       return blocks;
     }
+    if (inlineGapFill && currentCheckpoint != null) {
+      const blocks: bigint[] = [];
+      for (let n = currentCheckpoint + 1n; n <= effectiveMax; n++) {
+        blocks.push(n);
+      }
+      return blocks;
+    }
     if (filtered.length === 0) return [];
     return [...new Set(filtered.map((r) => r.blockNumber))];
+  }
+
+  /** live 小 gap：在单批 persist 内补全 checkpoint+1..effectiveMax 的 anchor 并推进。 */
+  private shouldInlineGapFill(
+    currentCheckpoint: bigint | null,
+    effectiveMax: bigint,
+  ): boolean {
+    if (currentCheckpoint == null) return false;
+    if (effectiveMax <= currentCheckpoint) return false;
+    const gap = effectiveMax - currentCheckpoint;
+    const maxGap = BigInt(this.env.MAX_INLINE_GAP_BLOCKS);
+    return gap > 1n && gap <= maxGap;
   }
 
   private async prefetchHeaders(blockNumbers: bigint[]): Promise<Map<string, BlockHeader>> {
@@ -159,8 +195,10 @@ export class FinalizedPersistService<T extends { blockNumber: bigint }> {
     options: PersistBatchOptions,
     currentCheckpoint: bigint | null,
     effectiveMax: bigint,
+    inlineGapFill: boolean,
   ): boolean {
     if (options.forceAdvance) return true;
+    if (inlineGapFill) return true;
     if (currentCheckpoint == null) return effectiveMax >= 0n;
     if (effectiveMax <= currentCheckpoint) return false;
     return effectiveMax === currentCheckpoint + 1n;

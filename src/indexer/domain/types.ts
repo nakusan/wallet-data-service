@@ -50,7 +50,7 @@ export interface Checkpoint {
 
 export interface ChainState {
   chainId: number;
-  /** 各活跃合约 checkpoint 的 MIN，即 indexer 写入进度（非链上最终性） */
+  /** 各活跃合约 checkpoint 的 MIN，用于 reorg 扫描与链级监控（物化上界已按合约计算） */
   minIndexedCheckpoint: bigint;
   minIndexedCheckpointHash: string | null;
   /** 链上真正最终化（不可逆）的块号，物化 worker 的安全上界 */

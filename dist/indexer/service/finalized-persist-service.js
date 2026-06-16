@@ -33,7 +33,8 @@ export class FinalizedPersistService {
         const filtered = records.filter((r) => r.blockNumber <= safeUpper);
         const currentCheckpoint = await this.checkpointRepo.get(contract.chainId, contract.address, this.indexerType);
         await this.partitionService.ensureThrough(effectiveMax);
-        const anchorBlocks = this.collectAnchorBlocks(options, filtered, currentCheckpoint, effectiveMax);
+        const inlineGapFill = !options.forceAdvance && this.shouldInlineGapFill(currentCheckpoint, effectiveMax);
+        const anchorBlocks = this.collectAnchorBlocks(options, filtered, currentCheckpoint, effectiveMax, inlineGapFill);
         const headerMap = await this.prefetchHeaders(anchorBlocks);
         const releaseSem = await this.writeSemaphore.acquire();
         const client = await this.pool.connect();
@@ -44,6 +45,15 @@ export class FinalizedPersistService {
                     (currentCheckpoint != null ? currentCheckpoint + 1n : effectiveMax);
                 const from = anchorStart > effectiveMax ? effectiveMax : anchorStart;
                 await this.writeAnchorsFromPrefetched(client, contract.chainId, from, effectiveMax, headerMap);
+            }
+            else if (inlineGapFill) {
+                const from = currentCheckpoint + 1n;
+                await this.writeAnchorsFromPrefetched(client, contract.chainId, from, effectiveMax, headerMap);
+                logger.debug({
+                    symbol: contract.symbol,
+                    from: from.toString(),
+                    to: effectiveMax.toString(),
+                }, 'live 内联补洞 anchor 完成');
             }
             else if (filtered.length > 0) {
                 const blocks = [...new Set(filtered.map((r) => r.blockNumber))].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
@@ -58,7 +68,7 @@ export class FinalizedPersistService {
             const inserted = filtered.length > 0
                 ? await this.transferRepo.batchUpsert(client, filtered)
                 : 0;
-            const shouldAdvance = this.shouldAdvanceCheckpoint(options, currentCheckpoint, effectiveMax);
+            const shouldAdvance = this.shouldAdvanceCheckpoint(options, currentCheckpoint, effectiveMax, inlineGapFill);
             if (shouldAdvance) {
                 const hash = await this.blockAnchorRepo.getHashAt(client, contract.chainId, effectiveMax);
                 await this.checkpointRepo.set(client, contract.chainId, contract.address, this.indexerType, effectiveMax, hash);
@@ -79,7 +89,7 @@ export class FinalizedPersistService {
             releaseSem();
         }
     }
-    collectAnchorBlocks(options, filtered, currentCheckpoint, effectiveMax) {
+    collectAnchorBlocks(options, filtered, currentCheckpoint, effectiveMax, inlineGapFill) {
         if (options.forceAdvance) {
             const anchorStart = options.anchorFromBlock ??
                 (currentCheckpoint != null ? currentCheckpoint + 1n : effectiveMax);
@@ -92,9 +102,26 @@ export class FinalizedPersistService {
             }
             return blocks;
         }
+        if (inlineGapFill && currentCheckpoint != null) {
+            const blocks = [];
+            for (let n = currentCheckpoint + 1n; n <= effectiveMax; n++) {
+                blocks.push(n);
+            }
+            return blocks;
+        }
         if (filtered.length === 0)
             return [];
         return [...new Set(filtered.map((r) => r.blockNumber))];
+    }
+    /** live 小 gap：在单批 persist 内补全 checkpoint+1..effectiveMax 的 anchor 并推进。 */
+    shouldInlineGapFill(currentCheckpoint, effectiveMax) {
+        if (currentCheckpoint == null)
+            return false;
+        if (effectiveMax <= currentCheckpoint)
+            return false;
+        const gap = effectiveMax - currentCheckpoint;
+        const maxGap = BigInt(this.env.MAX_INLINE_GAP_BLOCKS);
+        return gap > 1n && gap <= maxGap;
     }
     async prefetchHeaders(blockNumbers) {
         const map = new Map();
@@ -103,8 +130,10 @@ export class FinalizedPersistService {
         }
         return map;
     }
-    shouldAdvanceCheckpoint(options, currentCheckpoint, effectiveMax) {
+    shouldAdvanceCheckpoint(options, currentCheckpoint, effectiveMax, inlineGapFill) {
         if (options.forceAdvance)
+            return true;
+        if (inlineGapFill)
             return true;
         if (currentCheckpoint == null)
             return effectiveMax >= 0n;

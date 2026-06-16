@@ -1,7 +1,7 @@
 -- 链级派生状态
--- min_indexed_checkpoint：各活跃合约 checkpoint 的 MIN（indexer 写入进度）
+-- min_indexed_checkpoint：各活跃合约 checkpoint 的 MIN（reorg 扫描与链级监控）
 -- finalized_block：链上真正最终化块号（RPC finalized 标签；不支持时回退 latest - depth）
--- 物化 worker 安全上界 = LEAST(min_indexed_checkpoint, finalized_block)
+-- 物化 worker 安全上界按合约：LEAST(该合约 checkpoint, finalized_block)
 CREATE TABLE IF NOT EXISTS indexer_chain_state (
   chain_id                    INTEGER PRIMARY KEY,
   min_indexed_checkpoint      BIGINT NOT NULL DEFAULT 0,

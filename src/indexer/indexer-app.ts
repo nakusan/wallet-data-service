@@ -31,6 +31,8 @@ export class IndexerApp {
   private nftLiveWatcher: NftLiveWatcher | null = null;
   private partitionTimer: ReturnType<typeof setInterval> | null = null;
   private reorgTimer: ReturnType<typeof setInterval> | null = null;
+  private gapBackfillTimer: ReturnType<typeof setInterval> | null = null;
+  private gapBackfillRunning = false;
   private chainReorgCoordinator: ChainReorgCoordinator | null = null;
 
   private readonly contractRepo: ContractRepo;
@@ -108,11 +110,19 @@ export class IndexerApp {
       () => void this.runReorgScanTick(),
       this.env.REORG_SCAN_INTERVAL_MS,
     );
+    this.gapBackfillTimer = setInterval(
+      () => void this.runGapBackfillTick(),
+      this.env.GAP_BACKFILL_INTERVAL_MS,
+    );
 
     logger.info({ safeLatest: safeLatest.toString() }, '索引器（ERC20+NFT）已启动');
   }
 
   async shutdown(): Promise<void> {
+    if (this.gapBackfillTimer) {
+      clearInterval(this.gapBackfillTimer);
+      this.gapBackfillTimer = null;
+    }
     if (this.reorgTimer) {
       clearInterval(this.reorgTimer);
       this.reorgTimer = null;
@@ -341,6 +351,47 @@ export class IndexerApp {
       await this.chainReorgCoordinator?.scanAndRepair();
     } catch (err) {
       logger.error({ err }, '定时 reorg 扫描失败');
+    }
+  }
+
+  /** 定时将各合约 checkpoint 从 checkpoint+1 追至 safeLatest，补全空块 anchor。 */
+  private async runGapBackfillTick(): Promise<void> {
+    if (this.gapBackfillRunning) return;
+    this.gapBackfillRunning = true;
+    try {
+      const safeLatest = await getSafeBlockNumber(this.chain.http, this.env.CONFIRMATION_DEPTH);
+      await this.gapBackfillErc20(safeLatest);
+      await this.gapBackfillNft(safeLatest);
+    } catch (err) {
+      logger.error({ err }, '定时 gap-backfill 失败');
+    } finally {
+      this.gapBackfillRunning = false;
+    }
+  }
+
+  private async gapBackfillErc20(safeLatest: bigint): Promise<void> {
+    if (!this.erc20Backfill || this.erc20Contracts.length === 0) return;
+    for (const contract of this.erc20Contracts) {
+      const checkpoint = await this.checkpointRepo.get(
+        contract.chainId, contract.address, 'erc20',
+      );
+      if (checkpoint == null) continue;
+      const from = checkpoint + 1n;
+      if (from > safeLatest) continue;
+      await this.erc20Backfill.fillSegmented(contract, from, safeLatest);
+    }
+  }
+
+  private async gapBackfillNft(safeLatest: bigint): Promise<void> {
+    if (!this.nftBackfill || this.nftContracts.length === 0) return;
+    for (const contract of this.nftContracts) {
+      const checkpoint = await this.checkpointRepo.get(
+        contract.chainId, contract.address, 'nft',
+      );
+      if (checkpoint == null) continue;
+      const from = checkpoint + 1n;
+      if (from > safeLatest) continue;
+      await this.nftBackfill.fillSegmented(contract, from, safeLatest);
     }
   }
 }

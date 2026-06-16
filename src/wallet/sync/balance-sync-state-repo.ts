@@ -5,29 +5,34 @@ export type BalanceSyncType = 'erc20' | 'nft';
 export interface LaggingContract {
   contractAddress: string;
   lastSynced: bigint;
+  /** 该合约物化上界：LEAST(合约 checkpoint, finalized_block) */
+  safeUpper: bigint;
 }
 
 /** 无物化行时，从 start_block - 1 起算（与索引器首段 fromBlock 对齐）。 */
 const INITIAL_SYNCED_EXPR = `GREATEST(COALESCE(mc.start_block, 0) - 1, -1)`;
 
+/** 无 checkpoint 时与 INITIAL_SYNCED_EXPR 对齐，避免未索引合约被误判为 lagging。 */
+const CHECKPOINT_FALLBACK_EXPR = INITIAL_SYNCED_EXPR;
+
+const SAFE_UPPER_EXPR = `LEAST(COALESCE(cp.last_indexed_block, ${CHECKPOINT_FALLBACK_EXPR}), cs.finalized_block)`;
+
 export class BalanceSyncStateRepo {
   async pickLaggingErc20(
     client: PoolClient,
     chainId: number,
-    safeUpper: bigint,
     limit = 10,
   ): Promise<LaggingContract[]> {
-    return this.pickLagging(client, chainId, 'erc20', `'ERC20'`, safeUpper, limit);
+    return this.pickLagging(client, chainId, 'erc20', `'ERC20'`, limit);
   }
 
   async pickLaggingNft(
     client: PoolClient,
     chainId: number,
-    safeUpper: bigint,
     limit = 10,
   ): Promise<LaggingContract[]> {
     return this.pickLagging(
-      client, chainId, 'nft', `'ERC721','ERC1155'`, safeUpper, limit,
+      client, chainId, 'nft', `'ERC721','ERC1155'`, limit,
     );
   }
 
@@ -84,13 +89,18 @@ export class BalanceSyncStateRepo {
     chainId: number,
     syncType: BalanceSyncType,
     tokenTypesSql: string,
-    safeUpper: bigint,
     limit: number,
   ): Promise<LaggingContract[]> {
     const { rows } = await client.query(
       `SELECT lower(mc.address) AS contract_address,
-              COALESCE(bss.last_synced_block, ${INITIAL_SYNCED_EXPR}) AS last_synced
+              COALESCE(bss.last_synced_block, ${INITIAL_SYNCED_EXPR}) AS last_synced,
+              ${SAFE_UPPER_EXPR} AS safe_upper
        FROM monitored_contracts mc
+       INNER JOIN indexer_chain_state cs ON cs.chain_id = mc.chain_id
+       LEFT JOIN indexer_checkpoints cp
+         ON cp.chain_id = mc.chain_id
+        AND lower(cp.contract_address) = lower(mc.address)
+        AND cp.indexer_type = $2
        LEFT JOIN balance_sync_state bss
          ON bss.chain_id = mc.chain_id
         AND lower(bss.contract_address) = lower(mc.address)
@@ -98,14 +108,15 @@ export class BalanceSyncStateRepo {
        WHERE mc.chain_id = $1
          AND mc.is_active = true
          AND mc.token_type IN (${tokenTypesSql})
-         AND COALESCE(bss.last_synced_block, ${INITIAL_SYNCED_EXPR}) < $3
+         AND COALESCE(bss.last_synced_block, ${INITIAL_SYNCED_EXPR}) < ${SAFE_UPPER_EXPR}
        ORDER BY last_synced ASC
-       LIMIT $4`,
-      [chainId, syncType, safeUpper.toString(), limit],
+       LIMIT $3`,
+      [chainId, syncType, limit],
     );
     return rows.map((r) => ({
       contractAddress: r.contract_address as string,
       lastSynced: BigInt(r.last_synced as string),
+      safeUpper: BigInt(r.safe_upper as string),
     }));
   }
 }
