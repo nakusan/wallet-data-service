@@ -1,5 +1,6 @@
 import type { Pool } from 'pg';
 import type { ContractRepo } from '../../indexer/db/contract-repo.js';
+import { encodeCursor, type Cursor } from '../../api/util/cursor.js';
 import { INDEXED_DATA_DISCLAIMER } from './indexing-disclaimer.js';
 
 export interface TxRecord {
@@ -25,19 +26,6 @@ export interface TxPage {
   disclaimer: string;
 }
 
-interface Cursor {
-  blockNumber: string;
-  logIndex: number;
-}
-
-function encodeCursor(c: Cursor): string {
-  return Buffer.from(JSON.stringify(c)).toString('base64url');
-}
-
-function decodeCursor(s: string): Cursor {
-  return JSON.parse(Buffer.from(s, 'base64url').toString()) as Cursor;
-}
-
 export class TxHistoryService {
   constructor(
     private readonly pool: Pool,
@@ -50,13 +38,13 @@ export class TxHistoryService {
     opts: {
       token?: string;
       limit?: number;
-      cursor?: string;
+      cursor?: Cursor;
     } = {},
   ): Promise<TxPage> {
     const addr = address.toLowerCase();
     const limit = Math.min(opts.limit ?? 20, 100);
     const token = opts.token?.toLowerCase() ?? null;
-    const cursor = opts.cursor ? decodeCursor(opts.cursor) : null;
+    const cursor = opts.cursor ?? null;
 
     const indexedSinceBlock = token != null
       ? await this.contractRepo.getStartBlock(chainId, token)

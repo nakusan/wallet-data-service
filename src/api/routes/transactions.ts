@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type Redis from 'ioredis';
 import { authMiddleware } from '../middleware/auth.js';
 import type { TxHistoryService } from '../../wallet/service/tx-history-service.js';
+import { parseCursor } from '../util/cursor.js';
 import { assertChainId } from '../util/assert-chain-id.js';
 
 const addrSchema = z.string().regex(/^0x[0-9a-fA-F]{40}$/);
@@ -25,8 +26,9 @@ export function transactionsRouter(
     async (req, res, next) => {
       try {
         const addr = addrSchema.parse(req.params.addr);
-        const { chainId, token, limit, cursor } = querySchema.parse(req.query);
+        const { chainId, token, limit, cursor: cursorRaw } = querySchema.parse(req.query);
         assertChainId(chainId, configuredChainId);
+        const cursor = cursorRaw ? parseCursor(cursorRaw) : undefined;
 
         const page = await txService.getHistory(chainId, addr, { token, limit, cursor });
         res.json(page);
