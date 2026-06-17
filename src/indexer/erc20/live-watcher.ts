@@ -55,6 +55,14 @@ export class Erc20LiveWatcher {
     this.shouldRun = true;
     this.state = LiveState.WATCHING;
     this.reconnectAttempt = 0;
+    logger.info(
+      {
+        flow: 'erc20.live',
+        fromBlock: fromBlock.toString(),
+        contracts: contracts.map((c) => ({ symbol: c.symbol, address: c.address })),
+      },
+      'ERC20 WebSocket 订阅开始',
+    );
     this.subscribeAll(contracts, fromBlock);
   }
 
@@ -134,6 +142,10 @@ export class Erc20LiveWatcher {
         ? safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) : 0n;
       this.state = LiveState.WATCHING;
       this.reconnectAttempt = 0;
+      logger.info(
+        { flow: 'erc20.live', resumeFrom: resumeFrom.toString() },
+        'ERC20 WebSocket 重连成功，恢复订阅',
+      );
       this.subscribeAll(contracts, resumeFrom);
     } catch (err) {
       logger.error({ err }, 'WebSocket 重连流程失败');
@@ -148,6 +160,22 @@ export class Erc20LiveWatcher {
   ): Promise<void> {
     if (this.paused || this.state !== LiveState.WATCHING || logs.length === 0) return;
     const uniqueBlocks = [...new Set(logs.map((l) => l.blockNumber).filter((b): b is bigint => b != null))];
+    const minBlock = uniqueBlocks.length > 0
+      ? uniqueBlocks.reduce((min, b) => (b < min ? b : min))
+      : null;
+    logger.debug(
+      {
+        flow: 'erc20.live',
+        symbol: contract.symbol,
+        logs: logs.length,
+        blocks: uniqueBlocks.length,
+        minBlock: minBlock?.toString() ?? null,
+        maxBlock: uniqueBlocks.length > 0
+          ? uniqueBlocks.reduce((max, b) => (b > max ? b : max)).toString()
+          : null,
+      },
+      '收到 ERC20 Transfer 日志',
+    );
     const timestampMap = new Map<string, Date | null>();
     for (const bn of uniqueBlocks) {
       timestampMap.set(bn.toString(), await getBlockTimestamp(this.wsClient, bn));

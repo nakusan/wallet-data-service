@@ -49,7 +49,22 @@ export class BalanceSyncWorker {
 
   private async sync(): Promise<void> {
     const lagging = await this.loadWorkQueue();
-    if (lagging.length === 0) return;
+    if (lagging.length === 0) {
+      logger.debug({ flow: 'balance.sync' }, '无待同步 ERC20 合约');
+      return;
+    }
+
+    logger.info(
+      {
+        flow: 'balance.sync',
+        contracts: lagging.map((c) => ({
+          address: c.contractAddress,
+          lastSynced: c.lastSynced.toString(),
+          safeUpper: c.safeUpper.toString(),
+        })),
+      },
+      '开始 ERC20 余额物化同步',
+    );
 
     const cacheRanges: Array<{ contractAddress: string; fromBlock: bigint; toBlock: bigint }> = [];
 
@@ -59,8 +74,13 @@ export class BalanceSyncWorker {
     }
 
     for (const { contractAddress, fromBlock, toBlock } of cacheRanges) {
-      logger.debug(
-        { contract: contractAddress, from: fromBlock.toString(), to: toBlock.toString() },
+      logger.info(
+        {
+          flow: 'balance.sync',
+          contract: contractAddress,
+          from: fromBlock.toString(),
+          to: toBlock.toString(),
+        },
         'ERC20 余额同步完成',
       );
       await this.invalidateAffectedCache(contractAddress, fromBlock, toBlock);

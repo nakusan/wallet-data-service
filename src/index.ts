@@ -25,12 +25,17 @@ async function main() {
   const redis = getRedis();
   const chain = createChainClients(env);
 
+  logger.info(
+    { flow: 'startup', rpcHttp: env.RPC_HTTP_URL.replace(/\/v2\/\S+/, '/v2/***') },
+    '正在连接 RPC',
+  );
   const rpcChainId = await chain.http.getChainId();
   if (rpcChainId !== env.CHAIN_ID) {
     throw new Error(
       `CHAIN_ID=${env.CHAIN_ID} 与 RPC eth_chainId=${rpcChainId} 不一致，请检查配置`,
     );
   }
+  logger.info({ flow: 'startup', chainId: rpcChainId }, 'RPC 连接成功，chainId 校验通过');
 
   const indexerApp = new IndexerApp(workerPool, env, chain, writeSemaphore);
 
@@ -91,11 +96,13 @@ async function main() {
   process.on('uncaughtException', (err) => fatal('uncaughtException', err));
   process.on('unhandledRejection', (reason) => fatal('unhandledRejection', reason));
 
+  logger.info({ flow: 'startup' }, '正在启动索引器');
   await indexerApp.run();
+  logger.info({ flow: 'startup' }, '索引器就绪，正在启动物化同步 worker');
   balanceSyncWorker.start();
   nftSyncWorker.start();
 
-  logger.info({ chainId: env.CHAIN_ID }, 'wallet-data-service 已完全启动');
+  logger.info({ flow: 'startup', chainId: env.CHAIN_ID, port: env.PORT }, 'wallet-data-service 已完全启动');
 }
 
 main().catch((err) => {

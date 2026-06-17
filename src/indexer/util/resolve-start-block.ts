@@ -1,6 +1,29 @@
 import { logger } from '../../infrastructure/logger/logger.js';
 import type { MonitoredContract } from '../domain/types.js';
 
+export interface IndexWindowStartParams {
+  startBlock: bigint | null;
+  /** 当前安全块高（已扣除 CONFIRMATION_DEPTH） */
+  safeLatest: bigint;
+  lookbackBlocks: bigint;
+  hotPartitionMinBlock: bigint | null;
+}
+
+/**
+ * 解析索引起始块（无 checkpoint 时），与 resolveStartBlock 首扫逻辑一致。
+ * 供索引器与物化 worker 共用，保证 start_block 为 NULL 时从 lookback 下界起算。
+ */
+export function resolveIndexWindowStart(params: IndexWindowStartParams): bigint {
+  const { startBlock, safeLatest, lookbackBlocks, hotPartitionMinBlock } = params;
+  const lookbackFloor = safeLatest > lookbackBlocks ? safeLatest - lookbackBlocks : 0n;
+  let start = startBlock ?? lookbackFloor;
+  if (start < lookbackFloor) start = lookbackFloor;
+  if (hotPartitionMinBlock != null && start < hotPartitionMinBlock) {
+    start = hotPartitionMinBlock;
+  }
+  return start;
+}
+
 export interface ResolveStartBlockParams {
   contract: MonitoredContract;
   /** 已持久化的 checkpoint；有值时从 checkpoint+1 续扫，不再应用 start_block 钳制 */
@@ -28,29 +51,33 @@ export function resolveStartBlock(params: ResolveStartBlockParams): bigint {
 
   // 已有 checkpoint：续扫优先，不受 monitored_contracts.start_block 与钳制规则影响
   if (checkpoint != null) {
-    return checkpoint + 1n;
+    const start = checkpoint + 1n;
+    logger.info(
+      {
+        flow: 'indexer.contract',
+        symbol: contract.symbol,
+        checkpoint: checkpoint.toString(),
+        resolvedStartBlock: start.toString(),
+        safeLatest: safeLatest.toString(),
+      },
+      '起始块解析完成（从 checkpoint 续扫）',
+    );
+    return start;
   }
 
   const lookbackFloor = safeLatest > lookbackBlocks ? safeLatest - lookbackBlocks : 0n;
-
-  // start_block 为 NULL 时，从链头附近（safeLatest - lookback）开始
-  let start = contract.startBlock ?? lookbackFloor;
-
-  const configured = start;
-
-  // 钳制 1：不一次回填超过 lookback 窗口的历史块
-  if (start < lookbackFloor) {
-    start = lookbackFloor;
-  }
-
-  // 钳制 2：不低于热层 migration 预建分区下界（PartitionService 仅向上扩分区）
-  if (hotPartitionMinBlock != null && start < hotPartitionMinBlock) {
-    start = hotPartitionMinBlock;
-  }
+  const start = resolveIndexWindowStart({
+    startBlock: contract.startBlock,
+    safeLatest,
+    lookbackBlocks,
+    hotPartitionMinBlock,
+  });
+  const configured = contract.startBlock ?? lookbackFloor;
 
   if (start !== configured) {
     logger.warn(
       {
+        flow: 'indexer.contract',
         symbol: contract.symbol,
         configuredStartBlock: contract.startBlock?.toString() ?? null,
         resolvedStartBlock: start.toString(),
@@ -58,6 +85,17 @@ export function resolveStartBlock(params: ResolveStartBlockParams): bigint {
         hotPartitionMinBlock: hotPartitionMinBlock?.toString() ?? null,
       },
       'start_block 已钳制：原型仅从链头附近索引，且需落在热层预建分区范围内',
+    );
+  } else {
+    logger.info(
+      {
+        flow: 'indexer.contract',
+        symbol: contract.symbol,
+        checkpoint: null,
+        resolvedStartBlock: start.toString(),
+        safeLatest: safeLatest.toString(),
+      },
+      '起始块解析完成',
     );
   }
 

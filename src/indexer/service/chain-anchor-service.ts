@@ -75,8 +75,9 @@ export class ChainAnchorService {
       await client.query('BEGIN');
       await this.writeAnchorsForBlocks(client, chainId, missingBlocks, headerMap);
       await client.query('COMMIT');
-      logger.debug(
+      logger.info(
         {
+          flow: 'anchor',
           chainId,
           from: fromBlock.toString(),
           to: toBlock.toString(),

@@ -50,10 +50,10 @@ export class Erc20BackfillService {
         );
       } catch (error) {
         if (error instanceof ReorgDetectedError) {
-          logger.warn(
-            { symbol: contract.symbol, forkBlock: error.forkBlock.toString() },
-            '回填 anchor 检测到 reorg',
-          );
+        logger.warn(
+          { flow: 'erc20.backfill', symbol: contract.symbol, forkBlock: error.forkBlock.toString() },
+          '回填 anchor 检测到 reorg',
+        );
           this.reorgHandler.onReorgDetected(error);
           return;
         }
@@ -65,7 +65,10 @@ export class Erc20BackfillService {
 
   private async fill(contract: MonitoredContract, fromBlock: bigint, toBlock: bigint): Promise<void> {
     const address = contract.address as `0x${string}`;
-    logger.info({ symbol: contract.symbol, from: fromBlock.toString(), to: toBlock.toString() }, '开始回填');
+    logger.info(
+      { flow: 'erc20.backfill', symbol: contract.symbol, from: fromBlock.toString(), to: toBlock.toString() },
+      '开始回填',
+    );
 
     const logs = await this.logFetcher.fetchWithAdaptiveRange(
       address, fromBlock, toBlock, BigInt(this.env.BACKFILL_MAX_BLOCK_RANGE),
@@ -90,12 +93,22 @@ export class Erc20BackfillService {
         this.blockAnchorRepo, contract, 'erc20', toBlock,
       );
       logger.info(
-        { symbol: contract.symbol, logs: logs.length, inserted, checkpoint: toBlock.toString() },
+        {
+          flow: 'erc20.backfill',
+          symbol: contract.symbol,
+          logs: logs.length,
+          records: records.length,
+          inserted,
+          checkpoint: toBlock.toString(),
+        },
         '回填批次完成',
       );
     } catch (error) {
       if (error instanceof ReorgDetectedError) {
-        logger.warn({ symbol: contract.symbol, forkBlock: error.forkBlock.toString() }, '回填检测到 reorg');
+        logger.warn(
+          { flow: 'erc20.backfill', symbol: contract.symbol, forkBlock: error.forkBlock.toString() },
+          '回填检测到 reorg',
+        );
         this.reorgHandler.onReorgDetected(error);
         return;
       }

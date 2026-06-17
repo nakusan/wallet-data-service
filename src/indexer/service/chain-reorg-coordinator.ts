@@ -83,7 +83,10 @@ export class ChainReorgCoordinator implements ReorgHandler {
       const header = await this.blockReader.getHeader(n);
       if (stored.blockHash.toLowerCase() !== header.hash.toLowerCase()) {
         const commonAncestor = await this.ancestorFinder!.findCommonAncestorBelow(chainId, n);
-        logger.warn({ forkBlock: n.toString(), commonAncestor: commonAncestor.toString() }, 'reorg_detected');
+        logger.warn(
+          { flow: 'reorg', forkBlock: n.toString(), commonAncestor: commonAncestor.toString() },
+          'reorg_detected',
+        );
         return commonAncestor;
       }
     }
@@ -106,7 +109,10 @@ export class ChainReorgCoordinator implements ReorgHandler {
       const safeUpper = await getSafeBlockNumber(this.httpClient, this.env.CONFIRMATION_DEPTH);
       await Promise.all(moduleList.map((m) => this.backfillModule(m, commonAncestor, safeUpper)));
 
-      logger.info({ commonAncestor: commonAncestor.toString() }, 'reorg_backfill_completed');
+      logger.info(
+        { flow: 'reorg', commonAncestor: commonAncestor.toString() },
+        'reorg_backfill_completed',
+      );
 
       await Promise.all(moduleList.map((m) => m.writeCoordinator.drain()));
 

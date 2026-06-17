@@ -77,6 +77,7 @@ export class FinalizedPersistService<T extends { blockNumber: bigint }> {
         await this.writeAnchorsFromPrefetched(client, contract.chainId, from, effectiveMax, headerMap);
         logger.debug(
           {
+            flow: 'erc20.persist',
             symbol: contract.symbol,
             from: from.toString(),
             to: effectiveMax.toString(),
@@ -113,9 +114,27 @@ export class FinalizedPersistService<T extends { blockNumber: bigint }> {
       await this.chainStateRepo.syncFromContractMin(client, contract.chainId);
       await client.query('COMMIT');
 
+      const newCheckpoint = shouldAdvance ? effectiveMax : currentCheckpoint;
+      logger.info(
+        {
+          flow: 'erc20.persist',
+          indexerType: this.indexerType,
+          symbol: contract.symbol,
+          source: inlineGapFill ? 'inline_gap' : 'batch',
+          received: records.length,
+          inserted,
+          droppedUnconfirmed: records.length - filtered.length,
+          batchMaxBlock: batchMaxBlock.toString(),
+          effectiveMax: effectiveMax.toString(),
+          checkpoint: newCheckpoint?.toString() ?? null,
+          advanced: shouldAdvance,
+        },
+        '转账批次持久化完成',
+      );
+
       if (records.length > filtered.length) {
         logger.debug(
-          { symbol: contract.symbol, dropped: records.length - filtered.length },
+          { flow: 'erc20.persist', symbol: contract.symbol, dropped: records.length - filtered.length },
           '已丢弃未确认深度的实时日志',
         );
       }

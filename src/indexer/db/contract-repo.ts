@@ -54,4 +54,19 @@ export class ContractRepo {
     const val = rows[0]?.min_block;
     return val != null ? BigInt(val as string) : null;
   }
+
+  /** start_block 为 NULL 时写入索引起点，供物化层与索引窗口对齐。 */
+  async setStartBlockIfNull(
+    chainId: number,
+    contractAddress: string,
+    startBlock: bigint,
+  ): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      `UPDATE monitored_contracts
+       SET start_block = $3
+       WHERE chain_id = $1 AND lower(address) = lower($2) AND start_block IS NULL`,
+      [chainId, contractAddress, startBlock.toString()],
+    );
+    return (rowCount ?? 0) > 0;
+  }
 }

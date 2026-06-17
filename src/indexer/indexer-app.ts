@@ -22,10 +22,11 @@ import { Erc20LiveWatcher } from './erc20/live-watcher.js';
 import { NftTransferRepo } from './nft/transfer-repo.js';
 import { NftBackfillService } from './nft/backfill-service.js';
 import { NftLiveWatcher } from './nft/live-watcher.js';
-import type { NftTransferRecord, TransferRecord } from './domain/types.js';
+import type { MonitoredContract, NftTransferRecord, TransferRecord } from './domain/types.js';
 import { logger } from '../infrastructure/logger/logger.js';
 import type { WriteSemaphore } from '../infrastructure/db/write-semaphore.js';
-import { resolveStartBlock } from './util/resolve-start-block.js';
+import { resolveStartBlock, resolveIndexWindowStart } from './util/resolve-start-block.js';
+import { BalanceSyncStateRepo } from '../wallet/sync/balance-sync-state-repo.js';
 
 export class IndexerApp {
   private erc20LiveWatcher: Erc20LiveWatcher | null = null;
@@ -50,6 +51,8 @@ export class IndexerApp {
 
   /** 热层 migration 预建分区下界；用于 start_block 钳制（分区仅向上扩展） */
   private hotPartitionMinBlock: bigint | null = null;
+  private nftHotPartitionMinBlock: bigint | null = null;
+  private readonly balanceSyncStateRepo = new BalanceSyncStateRepo();
 
   constructor(
     private readonly pool: Pool,
@@ -81,6 +84,7 @@ export class IndexerApp {
   }
 
   async run(): Promise<void> {
+    logger.info({ flow: 'indexer.init' }, '索引器初始化开始');
     // 初始化链状态仓库，chainState
     await this.chainStateRepo.ensureInitialized(this.env.CHAIN_ID);
     await this.chainStateRepo.syncFromContractMinOnPool(this.env.CHAIN_ID);
@@ -88,7 +92,13 @@ export class IndexerApp {
 
     // 获取最新块号，预创建热分区
     const safeLatest = await getSafeBlockNumber(this.chain.http, this.env.CONFIRMATION_DEPTH);
+    logger.info(
+      { flow: 'indexer.init', safeLatest: safeLatest.toString(), confirmationDepth: this.env.CONFIRMATION_DEPTH },
+      '已获取安全块高',
+    );
     this.hotPartitionMinBlock = await new PartitionRepo(this.pool, 'token_transfers')
+      .getMinHotPartitionLowerBound();
+    this.nftHotPartitionMinBlock = await new PartitionRepo(this.pool, 'nft_transfers')
       .getMinHotPartitionLowerBound();
     await Promise.all([
       this.erc20PartitionService.ensureThroughWithBuffer(safeLatest),
@@ -122,7 +132,7 @@ export class IndexerApp {
       this.env.GAP_BACKFILL_INTERVAL_MS,
     );
 
-    logger.info({ safeLatest: safeLatest.toString() }, '索引器（ERC20+NFT）已启动');
+    logger.info({ safeLatest: safeLatest.toString(), flow: 'indexer.init' }, '索引器（ERC20+NFT）已启动');
   }
 
   async shutdown(): Promise<void> {
@@ -150,10 +160,22 @@ export class IndexerApp {
   private async setupErc20(coordinator: ChainReorgCoordinator): Promise<void> {
     const contracts = await this.contractRepo.findActive(this.env.CHAIN_ID, 'ERC20');
     if (contracts.length === 0) {
-      logger.warn('无活跃 ERC20 合约');
+      logger.warn({ flow: 'indexer.erc20' }, '无活跃 ERC20 合约');
       return;
     }
     this.erc20Contracts = contracts;
+    logger.info(
+      {
+        flow: 'indexer.erc20',
+        count: contracts.length,
+        contracts: contracts.map((c) => ({
+          symbol: c.symbol,
+          address: c.address,
+          startBlock: c.startBlock?.toString() ?? null,
+        })),
+      },
+      '已加载活跃 ERC20 合约',
+    );
 
     const writeCoordinator = new ContractWriteCoordinator();
     this.erc20WriteCoordinator = writeCoordinator;
@@ -214,6 +236,9 @@ export class IndexerApp {
 
     for (const contract of contracts) {
       const checkpoint = await this.checkpointRepo.get(contract.chainId, contract.address, 'erc20');
+      await this.ensureStartBlockPersisted(
+        contract, safeLatest, this.hotPartitionMinBlock, 'erc20', checkpoint,
+      );
       const start = resolveStartBlock({
         contract,
         checkpoint,
@@ -226,6 +251,15 @@ export class IndexerApp {
 
     const resumeFrom = safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) > 0n
       ? safeLatest - BigInt(this.env.BACKFILL_OVERLAP_BLOCKS) : 0n;
+
+    logger.info(
+      {
+        flow: 'erc20.live',
+        resumeFrom: resumeFrom.toString(),
+        contracts: contracts.map((c) => c.symbol),
+      },
+      'ERC20 WebSocket 实时监听启动',
+    );
 
     const liveWatcher = new Erc20LiveWatcher(
       this.env, this.chain.ws, writeCoordinator, persistService, coordinator,
@@ -317,12 +351,15 @@ export class IndexerApp {
 
     for (const contract of contracts) {
       const checkpoint = await this.checkpointRepo.get(contract.chainId, contract.address, 'nft');
+      await this.ensureStartBlockPersisted(
+        contract, safeLatest, this.nftHotPartitionMinBlock, 'nft', checkpoint,
+      );
       const start = resolveStartBlock({
         contract,
         checkpoint,
         safeLatest,
         lookbackBlocks: BigInt(this.env.INDEXER_START_LOOKBACK_BLOCKS),
-        hotPartitionMinBlock: this.hotPartitionMinBlock,
+        hotPartitionMinBlock: this.nftHotPartitionMinBlock,
       });
       if (start <= safeLatest) await backfill.fillSegmented(contract, start, safeLatest);
     }
@@ -341,7 +378,7 @@ export class IndexerApp {
             checkpoint,
             safeLatest: latest,
             lookbackBlocks: BigInt(this.env.INDEXER_START_LOOKBACK_BLOCKS),
-            hotPartitionMinBlock: this.hotPartitionMinBlock,
+            hotPartitionMinBlock: this.nftHotPartitionMinBlock,
           });
           if (from <= latest) await backfill.fillSegmented(contract, from, latest);
         }
@@ -384,10 +421,14 @@ export class IndexerApp {
     this.gapBackfillRunning = true;
     try {
       const safeLatest = await getSafeBlockNumber(this.chain.http, this.env.CONFIRMATION_DEPTH);
+      logger.debug(
+        { flow: 'gap.backfill', safeLatest: safeLatest.toString() },
+        '定时 gap-backfill 开始',
+      );
       await this.gapBackfillErc20(safeLatest);
       await this.gapBackfillNft(safeLatest);
     } catch (err) {
-      logger.error({ err }, '定时 gap-backfill 失败');
+      logger.error({ err, flow: 'gap.backfill' }, '定时 gap-backfill 失败');
     } finally {
       this.gapBackfillRunning = false;
     }
@@ -402,6 +443,15 @@ export class IndexerApp {
       if (checkpoint == null) continue;
       const from = checkpoint + 1n;
       if (from > safeLatest) continue;
+      logger.info(
+        {
+          flow: 'gap.backfill',
+          symbol: contract.symbol,
+          from: from.toString(),
+          to: safeLatest.toString(),
+        },
+        'ERC20 gap-backfill 开始',
+      );
       await this.erc20Backfill.fillSegmented(contract, from, safeLatest);
     }
   }
@@ -417,5 +467,61 @@ export class IndexerApp {
       if (from > safeLatest) continue;
       await this.nftBackfill.fillSegmented(contract, from, safeLatest);
     }
+  }
+
+  /** start_block 为 NULL 时，在首扫前持久化索引起点，供物化层对齐。 */
+  private async ensureStartBlockPersisted(
+    contract: MonitoredContract,
+    safeLatest: bigint,
+    hotPartitionMinBlock: bigint | null,
+    syncType: 'erc20' | 'nft',
+    checkpoint: bigint | null,
+  ): Promise<void> {
+    if (contract.startBlock != null) return;
+
+    const resolved = checkpoint == null
+      ? resolveIndexWindowStart({
+        startBlock: null,
+        safeLatest,
+        lookbackBlocks: BigInt(this.env.INDEXER_START_LOOKBACK_BLOCKS),
+        hotPartitionMinBlock,
+      })
+      : await this.getMinIndexedBlock(contract.chainId, contract.address, syncType);
+
+    if (resolved == null) return;
+
+    const updated = await this.contractRepo.setStartBlockIfNull(
+      contract.chainId, contract.address, resolved,
+    );
+    if (!updated) return;
+
+    contract.startBlock = resolved;
+    await this.balanceSyncStateRepo.rewindBelowIfNeeded(
+      this.pool, contract.chainId, contract.address, syncType, resolved - 1n,
+    );
+    logger.info(
+      {
+        flow: 'indexer.contract',
+        symbol: contract.symbol,
+        startBlock: resolved.toString(),
+        source: checkpoint == null ? 'lookback' : 'min_indexed_block',
+      },
+      'start_block 已初始化（与索引窗口对齐）',
+    );
+  }
+
+  private async getMinIndexedBlock(
+    chainId: number,
+    contractAddress: string,
+    syncType: 'erc20' | 'nft',
+  ): Promise<bigint | null> {
+    const table = syncType === 'erc20' ? 'token_transfers' : 'nft_transfers';
+    const { rows } = await this.pool.query(
+      `SELECT MIN(block_number)::text AS min_block FROM ${table}
+       WHERE chain_id=$1 AND contract_address=$2 AND status='indexed'`,
+      [chainId, contractAddress.toLowerCase()],
+    );
+    const val = rows[0]?.min_block;
+    return val != null ? BigInt(val as string) : null;
   }
 }

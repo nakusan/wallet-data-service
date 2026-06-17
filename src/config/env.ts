@@ -39,6 +39,8 @@ const envSchema = z.object({
   BALANCE_SYNC_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   NFT_SYNC_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  /** 可选：日志文件路径（相对项目根或绝对路径）；配置后同时写入终端与文件 */
+  LOG_FILE: z.string().min(1).optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

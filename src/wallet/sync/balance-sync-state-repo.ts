@@ -1,4 +1,4 @@
-import type { PoolClient } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 
 export type BalanceSyncType = 'erc20' | 'nft';
 
@@ -82,6 +82,23 @@ export class BalanceSyncStateRepo {
       [chainId, syncType, commonAncestor.toString()],
     );
     return rows.length > 0;
+  }
+
+  /** start_block 初始化后，将低于窗口下界的错误物化水位抬升对齐。 */
+  async rewindBelowIfNeeded(
+    pool: Pool,
+    chainId: number,
+    contractAddress: string,
+    syncType: BalanceSyncType,
+    minLastSynced: bigint,
+  ): Promise<void> {
+    await pool.query(
+      `UPDATE balance_sync_state
+       SET last_synced_block = $4, updated_at = NOW()
+       WHERE chain_id = $1 AND lower(contract_address) = lower($2)
+         AND sync_type = $3 AND last_synced_block < $4`,
+      [chainId, contractAddress, syncType, minLastSynced.toString()],
+    );
   }
 
   private async pickLagging(
