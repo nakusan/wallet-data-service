@@ -9,7 +9,12 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
     "migrate": "tsx scripts/migrate.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "test:db:setup": "tsx scripts/setup-test-db.ts",
+    "test:watch": "vitest"
   },
   "keywords": [
     "web3",
@@ -43,6 +48,7 @@
     "@types/pg": "^8.20.0",
     "@types/uuid": "^10.0.0",
     "tsx": "^4.19.3",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
   }
 }

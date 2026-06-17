@@ -81,10 +81,12 @@ export class IndexerApp {
   }
 
   async run(): Promise<void> {
+    // 初始化链状态仓库，chainState
     await this.chainStateRepo.ensureInitialized(this.env.CHAIN_ID);
     await this.chainStateRepo.syncFromContractMinOnPool(this.env.CHAIN_ID);
     await this.updateFinalizedBlock();
 
+    // 获取最新块号，预创建热分区
     const safeLatest = await getSafeBlockNumber(this.chain.http, this.env.CONFIRMATION_DEPTH);
     this.hotPartitionMinBlock = await new PartitionRepo(this.pool, 'token_transfers')
       .getMinHotPartitionLowerBound();
@@ -157,10 +159,15 @@ export class IndexerApp {
     this.erc20WriteCoordinator = writeCoordinator;
 
     const persistService = new FinalizedPersistService<TransferRecord>(
-      this.pool, this.env, this.chain.http,
-      this.erc20TransferRepo, this.checkpointRepo,
-      this.blockAnchorRepo, this.chainStateRepo,
-      this.erc20PartitionService, 'erc20',
+      this.pool, 
+      this.env, 
+      this.chain.http,
+      this.erc20TransferRepo, 
+      this.checkpointRepo,
+      this.blockAnchorRepo, 
+      this.chainStateRepo,
+      this.erc20PartitionService, 
+      'erc20',
       this.writeSemaphore,
     );
 
